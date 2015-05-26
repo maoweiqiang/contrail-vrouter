@@ -4,6 +4,7 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 #include "vr_os.h"
+#include "vr_packet.h"
 #include "vr_proto.h"
 #include "vrouter.h"
 #include "host/vr_host_packet.h"
@@ -174,6 +175,7 @@ vr_hpacket_pool_destroy(struct vr_hpacket_pool *pool)
         vr_hpacket_free(hpkt);
         hpkt = n_hpkt;
     }
+    vr_free(pool);
 
     return;
 }

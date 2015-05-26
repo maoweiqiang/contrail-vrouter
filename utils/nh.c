@@ -9,14 +9,13 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <getopt.h>
 
-#include <asm/types.h>
-
 #include <sys/types.h>
 #include <sys/socket.h>
+#if defined(__linux__)
 #include <asm/types.h>
 
 #include <linux/netlink.h>
@@ -24,28 +23,31 @@
 #include <linux/if_ether.h>
 
 #include <net/if.h>
-#include <net/ethernet.h>
-#ifdef __linux__
 #include <netinet/ether.h>
+#elif defined(__FreeBSD__)
+#include <net/if.h>
 #endif
-
+#include <net/ethernet.h>
 
 #include "vr_types.h"
 #include "vr_message.h"
 #include "vr_nexthop.h"
 #include "vr_genetlink.h"
+#include "vr_os.h"
 #include "nl_util.h"
+#include "ini_parser.h"
 
-static nh_set;
+static int nh_set;
 static struct nl_client *cl;
 static int8_t src_mac[6], dst_mac[6];
 static uint32_t nh_id, if_id, vrf_id ;
-static uint16_t flags;
+static uint32_t flags;
 static struct in_addr sip, dip;
 static uint16_t sport, dport;
 static int command;
 static int type;
 static bool dump_pending = false;
+static bool response_pending = true;
 static int dump_marker = -1;
 static int comp_nh[10];
 static int lbl[10];
@@ -59,7 +61,9 @@ nh_type(uint32_t type)
        case NH_DEAD:
            return "Dead";
        case NH_RCV:
-           return "Receieve";
+           return "Receive";
+       case NH_L2_RCV:
+           return "L2 Receive";
        case NH_ENCAP:
            return "Encap";
        case NH_TUNNEL:
@@ -70,15 +74,15 @@ nh_type(uint32_t type)
            return "Resolve";
        case NH_COMPOSITE:
            return "Composite";
-       case NH_VXLAN_VRF:
-           return "Vxlan Vrf";
+       case NH_VRF_TRANSLATE:
+           return "Vrf_Translate";
        default:
            return "Invalid";
     }
 }
 
 char *
-nh_flags(uint16_t flags, uint8_t type, char *ptr)
+nh_flags(uint32_t flags, uint8_t type, char *ptr)
 {
     int i;
     uint32_t mask;
@@ -89,7 +93,7 @@ nh_flags(uint16_t flags, uint8_t type, char *ptr)
 
 
     strcpy(ptr,"");
-    for(i = 1, mask = 1; (i < 16); i++, mask = mask << 1) { 
+    for(i = 0, mask = 1; (i < 32); i++, mask = mask << 1) {
         switch(flags & mask) {
         case NH_FLAG_VALID:
             strcat(ptr, "Valid, ");
@@ -98,7 +102,7 @@ nh_flags(uint16_t flags, uint8_t type, char *ptr)
         case NH_FLAG_POLICY_ENABLED:
             strcat(ptr, "Policy, ");
             break;
-        
+
         case NH_FLAG_RELAXED_POLICY:
             strcat(ptr, "Policy(R), ");
             break;
@@ -118,11 +122,6 @@ nh_flags(uint16_t flags, uint8_t type, char *ptr)
                 strcat(ptr, "Udp, ");
             break;
 
-        case NH_FLAG_COMPOSITE_L3:
-            if (type == NH_COMPOSITE)
-                strcat(ptr, "L3, ");
-            break;
-
         case NH_FLAG_COMPOSITE_L2:
             if (type == NH_COMPOSITE)
                 strcat(ptr, "L2, ");
@@ -138,26 +137,46 @@ nh_flags(uint16_t flags, uint8_t type, char *ptr)
                 strcat(ptr, "Fabric, ");
             break;
 
-        case NH_FLAG_COMPOSITE_MULTI_PROTO:
+        case NH_FLAG_COMPOSITE_EVPN:
             if (type == NH_COMPOSITE)
-                strcat(ptr, "Multi Proto, ");
+                strcat(ptr, "Evpn, ");
+            break;
+        case NH_FLAG_COMPOSITE_TOR:
+            if (type == NH_COMPOSITE)
+                strcat(ptr, "Tor, ");
+            break;
+
+        case NH_FLAG_COMPOSITE_ENCAP:
+            if (type == NH_COMPOSITE)
+                strcat(ptr, "Encap, ");
             break;
 
         case NH_FLAG_MCAST:
             strcat(ptr, "Multicast, ");
             break;
 
-        case NH_FLAG_ENCAP_L2:
-            if (type == NH_ENCAP)
-                strcat(ptr, "L2, ");
+        case NH_FLAG_ROUTE_LOOKUP:
+            strcat(ptr, "RouteLookup, ");
             break;
 
         case NH_FLAG_TUNNEL_VXLAN:
-                strcat(ptr, "Vxlan, ");
+        case NH_FLAG_VNID:
+            strcat(ptr, "Vxlan, ");
+            break;
+        case NH_FLAG_UNKNOWN_UC_FLOOD:
+            strcat(ptr, "Unicast Flood, ");
             break;
         }
     }
     return ptr;
+}
+
+static void
+nh_print_newline_header(void)
+{
+    printf("\n%14c", ' ');
+
+    return;
 }
 
 void
@@ -176,48 +195,48 @@ vr_nexthop_req_process(void *s_req)
         strcpy(fam, "AF_BRIDGE");
     else if (req->nhr_family == AF_UNSPEC)
         strcpy(fam, "AF_UNSPEC");
-    else 
+    else
         strcpy(fam, "N/A");
 
-    printf("Id:%03d  Type:%-8s  Fmly:%8s  Flags:%s  Rid:%d  Ref_cnt:%d\n", 
+    printf("Id:%-9d  Type:%-8s  Fmly:%8s  Flags:%s  Rid:%d  Ref_cnt:%d Vrf:%d",
                 req->nhr_id, nh_type(req->nhr_type), fam,
-                nh_flags(req->nhr_flags, req->nhr_type, flags_mem), req->nhr_rid, req->nhr_ref_cnt);
+                nh_flags(req->nhr_flags, req->nhr_type, flags_mem),
+                req->nhr_rid, req->nhr_ref_cnt, req->nhr_vrf);
 
-    if (req->nhr_type == NH_RCV)
-        printf("\tOif:%d\n", req->nhr_encap_oif_id);
-
-    if (req->nhr_type == NH_ENCAP) {
-        printf("\tEncapFmly:%04x Oif:%d Len:%d Data:", req->nhr_encap_family, req->nhr_encap_oif_id, req->nhr_encap_size);
+    if (req->nhr_type == NH_RCV) {
+        nh_print_newline_header();
+        printf("Oif:%d\n", req->nhr_encap_oif_id);
+    } else if (req->nhr_type == NH_ENCAP) {
+        nh_print_newline_header();
+        printf("EncapFmly:%04x Oif:%d Len:%d Data:", req->nhr_encap_family, req->nhr_encap_oif_id, req->nhr_encap_size);
         for (i = 0; i< req->nhr_encap_size; i++) {
             printf("%02x ", (unsigned char)req->nhr_encap[i]);
         }
         printf("\n");
-    }
-
-    if (req->nhr_type == NH_TUNNEL) {
-        printf("\tOif:%d Len:%d Flags %s Data:", req->nhr_encap_oif_id,
+    } else if (req->nhr_type == NH_TUNNEL) {
+        nh_print_newline_header();
+        printf("Oif:%d Len:%d Flags %s Data:", req->nhr_encap_oif_id,
                 req->nhr_encap_size, nh_flags(req->nhr_flags, req->nhr_type, flags_mem));
         for (i = 0; i< req->nhr_encap_size; i++) {
             printf("%02x ", (unsigned char)req->nhr_encap[i]);
         }
-        printf("\n\tVrf:%d", req->nhr_vrf);
+        nh_print_newline_header();
+        printf("Vrf:%d", req->nhr_vrf);
         a.s_addr = req->nhr_tun_sip;
         printf("  Sip:%s", inet_ntoa(a));
         a.s_addr = req->nhr_tun_dip;
         printf("  Dip:%s\n", inet_ntoa(a));
 
         if (req->nhr_flags & NH_FLAG_TUNNEL_UDP) {
-            printf("        Sport:%d Dport:%d\n", ntohs(req->nhr_tun_sport), 
+            printf("        Sport:%d Dport:%d\n", ntohs(req->nhr_tun_sport),
                                                   ntohs(req->nhr_tun_dport));
         }
-    }
-
-    if (req->nhr_type == NH_VXLAN_VRF) {
-        printf("\tVrf:%d\n", req->nhr_vrf);
-    }
-
-    if (req->nhr_type == NH_COMPOSITE) {
-        printf("\tSub NH(label):");
+    } else if (req->nhr_type == NH_VRF_TRANSLATE) {
+        nh_print_newline_header();
+        printf("Vrf:%d\n", req->nhr_vrf);
+    } else if (req->nhr_type == NH_COMPOSITE) {
+        nh_print_newline_header();
+        printf("Sub NH(label):");
         for (i = 0; i < req->nhr_nh_list_size; i++) {
             printf(" %d", req->nhr_nh_list[i]);
             if (req->nhr_label_list[i] >= 0)
@@ -226,9 +245,11 @@ vr_nexthop_req_process(void *s_req)
         printf("\n");
     }
 
-    if (command == 3)
+    if (command == 3) {
         dump_marker = req->nhr_id;
+    }
 
+    response_pending = false;
     printf("\n");
 }
 
@@ -236,28 +257,37 @@ void
 vr_response_process(void *s)
 {
    vr_response *resp = (vr_response *)s;
+
+   response_pending = false;
     if (resp->resp_code < 0) {
         printf("Error %s in kernel operation\n", strerror(-resp->resp_code));
     } else {
         if (command == 3) {
-            if (resp->resp_code & VR_MESSAGE_DUMP_INCOMPLETE)
+            if (resp->resp_code > 0)
+                response_pending = true;
+
+            if (resp->resp_code & VR_MESSAGE_DUMP_INCOMPLETE) {
                 dump_pending = true;
-            else
+                response_pending = true;
+            } else {
                 dump_pending = false;
+            }
         }
     }
 
     return;
 }
 
-int 
-vr_nh_op(int opt, int mode, uint32_t nh_id, uint32_t if_id, uint32_t vrf_id, 
-        int8_t *dst, int8_t  *src, struct in_addr sip, struct in_addr dip, uint32_t flags)
+int
+vr_nh_op(int opt, int mode, uint32_t nh_id, uint32_t if_id, uint32_t vrf_id,
+        int8_t *dst, int8_t  *src, struct in_addr sip, struct in_addr dip,
+        uint32_t flags)
 {
     vr_nexthop_req nh_req;
     char *buf;
     int ret, error, attr_len;
     struct nl_response *resp;
+    struct nlmsghdr *nlh;
     int i;
 
 op_retry:
@@ -269,14 +299,18 @@ op_retry:
         nh_req.nhr_flags = flags;
         nh_req.nhr_encap_oif_id = if_id;
         nh_req.nhr_encap_size = 0;
+#if defined(__linux__)
         nh_req.nhr_encap_family = ETH_P_ARP;
+#elif defined(__FreeBSD__)
+    nh_req.nhr_encap_family = ETHERTYPE_ARP;
+#endif
         nh_req.nhr_vrf = vrf_id;
         nh_req.nhr_tun_sip = sip.s_addr;
         nh_req.nhr_tun_dip = dip.s_addr;
         nh_req.nhr_tun_sport = htons(sport);
         nh_req.nhr_tun_dport = htons(dport);
         nh_req.nhr_nh_list_size = 0;
-        if ((mode == NH_TUNNEL) || 
+        if ((mode == NH_TUNNEL) ||
                 ((mode == NH_ENCAP) && !(flags & NH_FLAG_ENCAP_L2))) {
             nh_req.nhr_encap_size = 14;
             buf = calloc(1, nh_req.nhr_encap_size);
@@ -311,12 +345,10 @@ op_retry:
 
     nh_req.nhr_id = nh_id;
     nh_req.nhr_rid = 0;
-    if ((mode == NH_ENCAP) && (flags & NH_FLAG_ENCAP_L2)) 
+
+    if ((mode == NH_ENCAP) && (flags & NH_FLAG_ENCAP_L2))
         nh_req.nhr_family = AF_BRIDGE;
-    else if ((mode == NH_COMPOSITE) && (flags &
-                NH_FLAG_COMPOSITE_MULTI_PROTO))
-        nh_req.nhr_family = AF_UNSPEC;
-    else 
+    else
         nh_req.nhr_family = AF_INET;
 
     nh_req.nhr_type = mode;
@@ -333,9 +365,9 @@ op_retry:
     }
 
     attr_len = nl_get_attr_hdr_size();
-     
+
     error = 0;
-    ret = sandesh_encode(&nh_req, "vr_nexthop_req", vr_find_sandesh_info, 
+    ret = sandesh_encode(&nh_req, "vr_nexthop_req", vr_find_sandesh_info,
                              (nl_get_buf_ptr(cl) + attr_len),
                              (nl_get_buf_len(cl) - attr_len), &error);
 
@@ -347,13 +379,20 @@ op_retry:
     nl_build_attr(cl, ret, NL_ATTR_VR_MESSAGE_PROTOCOL);
     nl_update_nlh(cl);
 
+    response_pending = true;
     /* Send the request to kernel */
     ret = nl_sendmsg(cl);
-    while ((ret = nl_recvmsg(cl)) > 0) {
-        resp = nl_parse_reply(cl);
-        if (resp->nl_op == SANDESH_REQUEST) {
-            sandesh_decode(resp->nl_data, resp->nl_len, vr_find_sandesh_info, &ret);
+    while (response_pending) {
+        if ((ret = nl_recvmsg(cl)) > 0) {
+            resp = nl_parse_reply(cl);
+            if (resp->nl_op == SANDESH_REQUEST) {
+                sandesh_decode(resp->nl_data, resp->nl_len, vr_find_sandesh_info, &ret);
+            }
         }
+
+        nlh = (struct nlmsghdr *)cl->cl_buf;
+        if (!nlh->nlmsg_flags)
+            break;
     }
 
     if (dump_pending)
@@ -370,8 +409,13 @@ cmd_usage()
            "       [--vrf <vrf_id> ]\n"
            "       [--pol NH with policy]\n"
            "       [--rpol NH with relaxed policy]\n"
-           "       [--type <type> type of the tunnel 1 - rcv, 2 - encap, 3 - tunnel, 4 - resolve, 5 - discard, 6 - Composite, 7 - Vxlan VRF] \n"
+           "       [--rlkup Force Route Lookup]\n"
+           "       [--type <type> type of the tunnel 1 - rcv, 2 - encap \n"
+           "                       3 - tunnel, 4 - resolve, 5 - discard, 6 - Composite\n"
+           "                       7 - VRF Translate, 8 - L2 Rcv NH] \n"
            "                [RCV_NH options]\n"
+           "                    [--oif <if_id> out going interface index]\n"
+           "                [L2RCV_NH options]\n"
            "                    [--oif <if_id> out going interface index]\n"
            "                [ENCAP_NH optionsi - default L3]\n"
            "                    [--el2 encap L2 ]\n"
@@ -396,13 +440,16 @@ cmd_usage()
            "                [DISCARD_NH options]\n"
            "                [COMPOSITE_NH options]\n"
            "                    [--cni <nh_id> composite nexthop member id]\n"
-           "                    [--cl3 composite l3 nexhop]\n"
            "                    [--cl2 composite l2 nexhop]\n"
-           "                    [--cmp composit multiprotocol ]\n"
            "                    [--cfa composit fabric ]\n"
+           "                    [--cen composit encap ]\n"
+           "                    [--cevpn composit evpn ]\n"
            "                        [--lbl <lbl> label for composit fabric ]\n"
-           "                [VxlanVRF options]\n");
-
+           "                    [--tor composit tor ]\n"
+           "                        [--lbl <lbl> label for composit fabric ]\n"
+           "                [VRF Translate options]\n"
+           "                    [--vxlan Vxlan VRF Translation]\n"
+           "                    [--uucf Unknown Unicast Flood]\n");
     exit(-EINVAL);
 }
 
@@ -434,18 +481,22 @@ enum opt_index {
     UDP_OPT_IND,
     VXLAN_OPT_IND,
     CNI_OPT_IND,
-    CMP_OPT_IND,
-    CL3_OPT_IND,
     CL2_OPT_IND,
     CFA_OPT_IND,
     MC_OPT_IND,
     EL2_OPT_IND,
+    CEN_OPT_IND,
+    CEVPN_OPT_IND,
+    TOR_OPT_IND,
+    RLKUP_OPT_IND,
     LBL_OPT_IND,
+    UUCF_OPT_IND,
     LST_OPT_IND,
     GET_OPT_IND,
     CRT_OPT_IND,
     DEL_OPT_IND,
     CMD_OPT_IND,
+    RL2_OPT_IND,
     HLP_OPT_IND,
     MAX_OPT_IND
 };
@@ -476,13 +527,16 @@ static struct option long_options[] = {
     [UDP_OPT_IND]       = {"udp",   no_argument,        &opt[UDP_OPT_IND],      1},
     [VXLAN_OPT_IND]     = {"vxlan", no_argument,        &opt[VXLAN_OPT_IND],    1},
     [CNI_OPT_IND]       = {"cni",   required_argument,  &opt[CNI_OPT_IND],      1},
-    [CMP_OPT_IND]       = {"cmp",   no_argument,        &opt[CMP_OPT_IND],      1},
-    [CL3_OPT_IND]       = {"cl3",   no_argument,        &opt[CL3_OPT_IND],      1},
     [CL2_OPT_IND]       = {"cl2",   no_argument,        &opt[CL2_OPT_IND],      1},
     [CFA_OPT_IND]       = {"cfa",   no_argument,        &opt[CFA_OPT_IND],      1},
     [MC_OPT_IND]        = {"mc",    no_argument,        &opt[MC_OPT_IND],       1},
     [EL2_OPT_IND]       = {"el2",   no_argument,        &opt[EL2_OPT_IND],      1},
+    [CEN_OPT_IND]       = {"cen",   no_argument,        &opt[CEN_OPT_IND],      1},
+    [CEVPN_OPT_IND]     = {"cevpn", no_argument,        &opt[CEVPN_OPT_IND],    1},
+    [TOR_OPT_IND]       = {"tor",   no_argument,        &opt[TOR_OPT_IND],      1},
+    [RLKUP_OPT_IND]     = {"rlkup", no_argument,        &opt[RLKUP_OPT_IND],    1},
     [LBL_OPT_IND]       = {"lbl",   required_argument,  &opt[LBL_OPT_IND],      1},
+    [UUCF_OPT_IND]      = {"uucf",  no_argument,        &opt[UUCF_OPT_IND],     1},
     [LST_OPT_IND]       = {"list",  no_argument,        &opt[LST_OPT_IND],      1},
     [GET_OPT_IND]       = {"get",   required_argument,  &opt[GET_OPT_IND],      1},
     [CRT_OPT_IND]       = {"create", required_argument, &opt[CRT_OPT_IND],      1},
@@ -514,7 +568,7 @@ parse_long_opts(int ind, char *opt_arg)
             break;
         case OIF_OPT_IND:
             if_id = strtoul(opt_arg, NULL, 0);
-            if (errno) 
+            if (errno)
                 usage();
             break;
         case SMAC_OPT_IND:
@@ -533,12 +587,12 @@ parse_long_opts(int ind, char *opt_arg)
             break;
         case VRF_OPT_IND:
             vrf_id = strtoul(opt_arg, NULL, 0);
-            if (errno) 
+            if (errno)
                 usage();
             break;
         case TYPE_OPT_IND:
             type = strtoul(opt_arg, NULL, 0);
-            if (errno) 
+            if (errno)
                 usage();
             break;
         case SIP_OPT_IND:
@@ -549,7 +603,7 @@ parse_long_opts(int ind, char *opt_arg)
             break;
         case SPORT_OPT_IND:
             sport = strtoul(opt_arg, NULL, 0);
-            if (errno) 
+            if (errno)
                 usage();
             break;
         case CNI_OPT_IND:
@@ -563,7 +617,7 @@ parse_long_opts(int ind, char *opt_arg)
                 usage();
         case DPORT_OPT_IND:
             dport = strtoul(opt_arg, NULL, 0);
-            if (errno) 
+            if (errno)
                 usage();
     }
 }
@@ -601,14 +655,19 @@ validate_options()
             if (opt_set(RPOL_OPT_IND))
                 flags |= NH_FLAG_RELAXED_POLICY;
 
+            if (opt_set(RLKUP_OPT_IND))
+                flags |= NH_FLAG_ROUTE_LOOKUP;
 
             if (type == NH_RCV) {
                 if (!opt_set(OIF_OPT_IND))
                     cmd_usage();
                 if (memcmp(opt, zero_opt, sizeof(opt)))
                     cmd_usage();
+            } else if (type == NH_L2_RCV) {
+                if (memcmp(opt, zero_opt, sizeof(opt)))
+                    cmd_usage();
             } else if (type == NH_ENCAP) {
-                if (!opt_set(OIF_OPT_IND)) 
+                if (!opt_set(OIF_OPT_IND))
                     cmd_usage();
 
                 if (!opt_set(EL2_OPT_IND)) {
@@ -628,9 +687,10 @@ validate_options()
                 }
 
                 if (opt_set(UDP_OPT_IND)) {
-                    flags |= NH_FLAG_TUNNEL_UDP;
                     if (!opt_set(SPORT_OPT_IND) || !opt_set(DPORT_OPT_IND))
-                        cmd_usage();
+                        flags |= NH_FLAG_TUNNEL_UDP_MPLS;
+                    else
+                        flags |= NH_FLAG_TUNNEL_UDP;
                 } else if (opt_set(VXLAN_OPT_IND)) {
                     flags |= NH_FLAG_TUNNEL_VXLAN;
                     if (!opt_set(SPORT_OPT_IND) || !opt_set(DPORT_OPT_IND))
@@ -651,18 +711,25 @@ validate_options()
                 if (!opt_set(CNI_OPT_IND))
                     cmd_usage();
 
-                if (opt_set(CL3_OPT_IND))
-                    flags |= NH_FLAG_COMPOSITE_L3;
                 if (opt_set(CL2_OPT_IND))
                     flags |= NH_FLAG_COMPOSITE_L2;
                 if (opt_set(CFA_OPT_IND))
                     flags |= NH_FLAG_COMPOSITE_FABRIC;
-                if (opt_set(CMP_OPT_IND))
-                    flags |= NH_FLAG_COMPOSITE_MULTI_PROTO;
+                if (opt_set(CEN_OPT_IND))
+                    flags |= NH_FLAG_COMPOSITE_ENCAP;
+                if (opt_set(CEVPN_OPT_IND))
+                    flags |= NH_FLAG_COMPOSITE_EVPN;
+                if (opt_set(TOR_OPT_IND))
+                    flags |= NH_FLAG_COMPOSITE_TOR;
                 opt_set(LBL_OPT_IND);
                 if (memcmp(opt, zero_opt, sizeof(opt)))
                     cmd_usage();
-            } else if (type != NH_VXLAN_VRF) {
+            } else if (type == NH_VRF_TRANSLATE) {
+                if (opt_set(VXLAN_OPT_IND))
+                    flags |= NH_FLAG_VNID;
+                if (opt_set(UUCF_OPT_IND))
+                    flags |= NH_FLAG_UNKNOWN_UC_FLOOD;
+            } else {
                 cmd_usage();
             }
             break;
@@ -698,9 +765,16 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    ret = nl_socket(cl, NETLINK_GENERIC);    
+    parse_ini_file();
+
+    ret = nl_socket(cl, get_domain(), get_type(), get_protocol());
     if (ret <= 0) {
-       exit(1);
+        exit(1);
+    }
+
+    ret = nl_connect(cl, get_ip(), get_port());
+    if (ret < 0) {
+        exit(1);
     }
 
     if (vrouter_get_family_id(cl) <= 0) {

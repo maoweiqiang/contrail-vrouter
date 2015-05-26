@@ -4,44 +4,72 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 #include <vr_os.h>
+#include <vr_types.h>
+#include <vr_packet.h>
+#include "vr_interface.h"
 #include "vr_message.h"
 #include "vr_sandesh.h"
 #include "vr_vxlan.h"
+#include "vr_bridge.h"
+#include "vr_datapath.h"
 
 int
-vr_vxlan_input(struct vrouter *router, struct vr_packet *pkt, 
+vr_vxlan_input(struct vrouter *router, struct vr_packet *pkt,
                                 struct vr_forwarding_md *fmd)
 {
     struct vr_vxlan *vxlan;
-    unsigned int vnid;
+    unsigned int vnid, drop_reason;
     struct vr_nexthop *nh;
-    unsigned short vrf;
+    struct vr_forwarding_md c_fmd;
+    struct vr_ip *ip;
+
+    if (!fmd) {
+        vr_init_forwarding_md(&c_fmd);
+        fmd = &c_fmd;
+    }
+
+    ip = (struct vr_ip *)pkt_network_header(pkt);
+    fmd->fmd_outer_src_ip = ip->ip_saddr;
 
     vxlan = (struct vr_vxlan *)pkt_data(pkt);
-    if (ntohl(vxlan->vxlan_flags) != VR_VXLAN_IBIT)
+    if (ntohl(vxlan->vxlan_flags) != VR_VXLAN_IBIT) {
+        drop_reason = VP_DROP_INVALID_VNID;
         goto fail;
+    }
 
     vnid = ntohl(vxlan->vxlan_vnid) >> VR_VXLAN_VNID_SHIFT;
     if (!pkt_pull(pkt, sizeof(struct vr_vxlan))) {
-        vr_pfree(pkt, VP_DROP_PULL);
-        return 0;
+        drop_reason = VP_DROP_PULL;
+        goto fail;
+    }
+    fmd->fmd_label = vnid;
+
+    nh = (struct vr_nexthop *)vr_itable_get(router->vr_vxlan_table, vnid);
+    if (!nh) {
+        drop_reason = VP_DROP_INVALID_VNID;
+        goto fail;
     }
 
-    nh = (struct vr_nexthop *)vr_itable_get(router->vr_vxlan_table, vnid); 
-    if (nh) {
-        if (nh->nh_vrf >= 0) {
-            vrf = nh->nh_vrf;
-        } else if (nh->nh_dev) {
-            vrf = nh->nh_dev->vif_vrf;
-        } else {
-            vrf = pkt->vp_if->vif_vrf;
-        }
+    fmd->fmd_vlan = VLAN_ID_INVALID;
 
-        return nh_output(vrf, pkt, nh, fmd);
+    if (vr_pkt_type(pkt, 0, fmd) < 0) {
+        drop_reason = VP_DROP_INVALID_PACKET;
+        goto fail;
     }
+    pkt->vp_flags |= VP_FLAG_GRO;
+
+    if (nh->nh_vrf >= 0) {
+        fmd->fmd_dvrf = nh->nh_vrf;
+    } else if (nh->nh_dev) {
+        fmd->fmd_dvrf = nh->nh_dev->vif_vrf;
+    } else {
+        fmd->fmd_dvrf = pkt->vp_if->vif_vrf;
+    }
+
+    return nh_output(pkt, nh, fmd);
 
 fail:
-    vr_pfree(pkt, VP_DROP_INVALID_VNID);
+    vr_pfree(pkt, drop_reason);
     return 0;
 }
 
@@ -99,11 +127,12 @@ vr_vxlan_get(vr_vxlan_req *req)
     struct vr_nexthop *nh = NULL;
     struct vrouter *router;
 
-   router = vrouter_get(req->vxlanr_rid);
+    router = vrouter_get(req->vxlanr_rid);
     if (!router) {
         ret = -ENODEV;
     } else {
-        nh = (struct vr_nexthop *)vr_itable_get(router->vr_vxlan_table, req->vxlanr_vnid); 
+        nh = (struct vr_nexthop *)vr_itable_get(router->vr_vxlan_table,
+                req->vxlanr_vnid);
         if (!nh)
             ret = -ENOENT;
     }
@@ -154,11 +183,11 @@ vr_vxlan_add(vr_vxlan_req *req)
     }
 
     nh = vrouter_get_nexthop(req->vxlanr_rid, req->vxlanr_nhid);
-    if (!nh)  {
+    if (!nh) {
         ret = -EINVAL;
         goto generate_resp;
     }
-    
+
     nh_old = vr_itable_set(router->vr_vxlan_table, req->vxlanr_vnid, nh);
     if (nh_old) {
         if (nh_old == VR_ITABLE_ERR_PTR) {
@@ -182,23 +211,25 @@ vr_vxlan_req_process(void *s_req)
     switch(req->h_op) {
     case SANDESH_OP_ADD:
         vr_vxlan_add(req);
-       break;
+        break;
 
     case SANDESH_OP_GET:
         vr_vxlan_get(req);
-       break;
+        break;
 
     case SANDESH_OP_DUMP:
         vr_vxlan_dump(req);
-       break;
+        break;
 
     case SANDESH_OP_DELETE:
         vr_vxlan_del(req);
-       break;
+        break;
 
     default:
-       break;
+        break;
     }
+
+    return;
 }
 
 static void

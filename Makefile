@@ -57,16 +57,18 @@ ifneq ($(KERNELRELEASE), )
 
 	vrouter-y += dp-core/vr_message.o dp-core/vr_sandesh.o
 	vrouter-y += dp-core/vr_queue.o dp-core/vr_index_table.o
-	vrouter-y += dp-core/vrouter.o dp-core/vr_route.o dp-core/vr_nexthop.o
+	vrouter-y += dp-core/vrouter.o dp-core/vr_route.o
+	vrouter-y += dp-core/vr_nexthop.o dp-core/vr_vif_bridge.o
 	vrouter-y += dp-core/vr_datapath.o dp-core/vr_interface.o
 	vrouter-y += dp-core/vr_packet.o dp-core/vr_proto_ip.o
-	vrouter-y += dp-core/vr_mpls.o dp-core/vr_ip4_mtrie.o
+	vrouter-y += dp-core/vr_mpls.o dp-core/vr_ip_mtrie.o
 	vrouter-y += dp-core/vr_response.o dp-core/vr_flow.o
 	vrouter-y += dp-core/vr_mirror.o dp-core/vr_vrf_assign.o
-	vrouter-y += dp-core/vr_index_table.o dp-core/vr_mcast.o
+	vrouter-y += dp-core/vr_index_table.o
 	vrouter-y += dp-core/vr_stats.o dp-core/vr_btable.o
 	vrouter-y += dp-core/vr_bridge.o dp-core/vr_htable.o
 	vrouter-y += dp-core/vr_vxlan.o dp-core/vr_fragment.o
+	vrouter-y += dp-core/vr_proto_ip6.o dp-core/vr_buildinfo.o
 
 	ccflags-y += -I$(src)/include -I$(SANDESH_HEADER_PATH)/sandesh/gen-c
 	ccflags-y += -I$(SANDESH_EXTRA_HEADER_PATH)
@@ -91,6 +93,7 @@ endif
 ifneq ($(SANDESH_SRC_ROOT),)
 	$(RM) $(SANDESH_BINS) $(SANDESH_LIB_BINS)
 endif
+	-$(RM) dp-core/vr_buildinfo.c
 
 cscope:
 	find -L . -name "*.[cChHyYSsmM]" > cscope.files

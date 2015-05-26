@@ -9,14 +9,15 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <getopt.h>
 #include <stdbool.h>
 
-#include <asm/types.h>
+#include "vr_os.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#if defined(__linux__)
 #include <asm/types.h>
 
 #include <linux/netlink.h>
@@ -25,16 +26,21 @@
 
 #include <net/if.h>
 #include <netinet/ether.h>
+#elif defined(__FreeBSD__)
+#include <net/if.h>
+#include <net/ethernet.h>
+#endif
 
 #include "vr_types.h"
 #include "vr_message.h"
 #include "vr_vxlan.h"
 #include "vr_genetlink.h"
 #include "nl_util.h"
+#include "ini_parser.h"
 
 static struct nl_client *cl;
 static bool dump_pending = false;
-static int op;
+static bool response_pending = true;
 unsigned int dump_marker= 0;
 
 static int vxlan_vnid = 99999;
@@ -55,31 +61,41 @@ vr_vxlan_req_process(void *s_req)
 
    dump_marker = req->vxlanr_vnid;
 
+   response_pending = false;
+
    return;
 }
 
 void
 vr_response_process(void *s)
 {
-   vr_response *resp = (vr_response *)s;
+    vr_response *resp = (vr_response *)s;
+    response_pending = false;
+
     if (resp->resp_code < 0) {
         printf("Error: %s\n", strerror(-resp->resp_code));
     } else {
-        if (op == 4) {
-            if (resp->resp_code & VR_MESSAGE_DUMP_INCOMPLETE)
+        if (vxlan_op == SANDESH_OP_DUMP) {
+            if (resp->resp_code > 0)
+                response_pending = true;
+
+            if (resp->resp_code & VR_MESSAGE_DUMP_INCOMPLETE) {
                 dump_pending = true;
-            else
+                response_pending = true;
+            } else {
                 dump_pending = false;
+            }
         }
     }
 }
 
-static int 
+static int
 vr_vxlan_op(void)
 {
     vr_vxlan_req vxlan_req;
     int ret, error, attr_len;
     struct nl_response *resp;
+    struct nlmsghdr *nlh;
 
 op_retry:
     vxlan_req.h_op = vxlan_op;
@@ -112,9 +128,9 @@ op_retry:
     }
 
     attr_len = nl_get_attr_hdr_size();
-     
+
     error = 0;
-    ret = sandesh_encode(&vxlan_req, "vr_vxlan_req", vr_find_sandesh_info, 
+    ret = sandesh_encode(&vxlan_req, "vr_vxlan_req", vr_find_sandesh_info,
                              (nl_get_buf_ptr(cl) + attr_len),
                              (nl_get_buf_len(cl) - attr_len), &error);
 
@@ -126,13 +142,21 @@ op_retry:
     nl_build_attr(cl, ret, NL_ATTR_VR_MESSAGE_PROTOCOL);
     nl_update_nlh(cl);
 
+    response_pending = true;
     /* Send the request to kernel */
     ret = nl_sendmsg(cl);
-    while ((ret = nl_recvmsg(cl)) > 0) {
-        resp = nl_parse_reply(cl);
-        if (resp->nl_op == SANDESH_REQUEST) {
-            sandesh_decode(resp->nl_data, resp->nl_len, vr_find_sandesh_info, &ret);
+    while (response_pending) {
+        if ((ret = nl_recvmsg(cl)) > 0) {
+            resp = nl_parse_reply(cl);
+            if (resp->nl_op == SANDESH_REQUEST) {
+                sandesh_decode(resp->nl_data, resp->nl_len,
+                               vr_find_sandesh_info, &ret);
+            }
         }
+
+        nlh = (struct nlmsghdr *)cl->cl_buf;
+        if (!nlh->nlmsg_flags)
+            break;
     }
 
     if (dump_pending)
@@ -335,9 +359,16 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    ret = nl_socket(cl, NETLINK_GENERIC);    
+    parse_ini_file();
+
+    ret = nl_socket(cl, get_domain(), get_type(), get_protocol());
     if (ret <= 0) {
-       exit(1);
+        exit(1);
+    }
+
+    ret = nl_connect(cl, get_ip(), get_port());
+    if (ret < 0) {
+        exit(1);
     }
 
     if (vrouter_get_family_id(cl) <= 0) {

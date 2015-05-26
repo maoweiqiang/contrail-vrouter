@@ -3,8 +3,9 @@
 #
 
 Import('VRouterEnv')
-env = VRouterEnv
- 
+env = VRouterEnv.Clone()
+VRutilsEnv = env;
+
 vr_root = '../'
 
 system_header_path = GetOption('system-header-path')
@@ -14,10 +15,19 @@ if system_header_path:
 # CFLAGS
 env.Append(CCFLAGS = '-g')
 
+if 'install' in COMMAND_LINE_TARGETS:
+    VRutilsEnv.Append(SRC_INSTALL_TARGET = '/utils/')
+
+subdirs = ['dkms', 'vtest']
+for sdir in  subdirs:
+    env.SConscript(sdir + '/SConscript',
+                    exports='VRutilsEnv',
+                    duplicate = 0)
 
 # Build libvrutil
 libvrutil = 'vrutil'
-libvrutil_objs = [env.Object('nl_util.lo', 'nl_util.c'), env.Object('udp_util.lo', 'udp_util.c')]
+libvrutil_objs = [env.Object('nl_util.lo', 'nl_util.c'), env.Object('udp_util.lo', 'udp_util.c'),
+                  env.Object('ini_parser.lo', 'ini_parser.c')]
 env.StaticLibrary(libvrutil, libvrutil_objs)
 
 env.Replace(LIBPATH = env['TOP_LIB'])
@@ -52,10 +62,14 @@ dropstats = env.Program(target = 'dropstats', source = dropstats_sources)
 vxlan_sources = ['vxlan.c']
 vxlan = env.Program(target = 'vxlan', source = vxlan_sources)
 
+vrouter_sources = ['vrouter.c']
+vrouter = env.Program(target = 'vrouter', source = vrouter_sources)
+
 # to make sure that all are built when you do 'scons' @ the top level
-binaries  = [vif, rt, nh, mirror, mpls, flow, vrfstats, dropstats, vxlan]
+binaries  = [vif, rt, nh, mirror, mpls, flow, vrfstats, dropstats, vxlan, vrouter]
+scripts  = ['vifdump']
 env.Default(binaries)
-env.Alias('install', env.Install(env['INSTALL_BIN'], binaries))
+env.Alias('install', env.Install(env['INSTALL_BIN'], binaries + scripts))
 # Local Variables:
 # mode: python
 # End:

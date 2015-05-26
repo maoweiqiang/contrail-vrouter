@@ -4,18 +4,7 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 #include <vr_os.h>
-
-void
-pkt_reset(struct vr_packet *pkt)
-{
-    vr_preset(pkt);
-
-    pkt->vp_tail = pkt->vp_data;
-    pkt->vp_len = 0;
-    pkt->vp_network_h = pkt->vp_data;
-
-    return;
-}
+#include <vr_packet.h>
 
 struct vr_packet *
 pkt_copy(struct vr_packet *pkt, unsigned short off, unsigned short len)
@@ -23,7 +12,11 @@ pkt_copy(struct vr_packet *pkt, unsigned short off, unsigned short len)
     struct vr_packet *pkt_c;
     unsigned short head_space;
 
-    head_space = sizeof(struct vr_eth) + sizeof(struct agent_hdr);
+    /*
+     * one eth header for agent, and one more for packets from
+     * tun interfaces
+     */
+    head_space = (2 * sizeof(struct vr_eth)) + sizeof(struct agent_hdr);
     pkt_c = vr_palloc(head_space + len);
     if (!pkt_c)
         return pkt_c;

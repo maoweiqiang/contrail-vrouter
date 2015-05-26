@@ -12,16 +12,16 @@ extern "C" {
 
 #include "sandesh.h"
 #include "vr_types.h"
-#include "vr_interface.h"
 #include "vr_flow.h"
 #include "vr_nexthop.h"
 #include "vr_route.h"
-#include "vr_flow.h"
 #include "vr_response.h"
 #include "vr_mpls.h"
 #include "vr_index_table.h"
 
 #define VR_NATIVE_VRF       0
+#define VR_UNIX_PATH_MAX    108
+#define VR_MAX_CPUS         64
 
 #define VR_CPU_MASK     0xff
 extern unsigned int vr_num_cpus;
@@ -34,8 +34,11 @@ extern int vr_perfr1, vr_perfr2, vr_perfr3;
 extern int vr_perfq1, vr_perfq2, vr_perfq3;
 extern int vr_from_vm_mss_adj;
 extern int vr_to_vm_mss_adj;
+extern int vr_udp_coff;
+extern unsigned int vr_flow_hold_limit;
+extern int vr_use_linux_br;
 extern int hashrnd_inited;
-extern __u32 vr_hashrnd;
+extern uint32_t vr_hashrnd;
 
 #define CONTAINER_OF(member, struct_type, pointer) \
     ((struct_type *)((unsigned long)pointer - \
@@ -54,6 +57,7 @@ struct vr_timer {
 };
 
 struct host_os {
+    int (*hos_printf)(const char *, ...);
     void *(*hos_malloc)(unsigned int);
     void *(*hos_zalloc)(unsigned int);
     void (*hos_free)(void *);
@@ -72,6 +76,7 @@ struct host_os {
     unsigned short (*hos_pfrag_len)(struct vr_packet *);
     unsigned short (*hos_phead_len)(struct vr_packet *);
     void (*hos_pset_data)(struct vr_packet *, unsigned short);
+    unsigned int (*hos_pgso_size)(struct vr_packet *);
 
     unsigned int (*hos_get_cpu)(void);
     void (*hos_schedule_work)(unsigned int, void (*)(void *), void *);
@@ -89,21 +94,27 @@ struct host_os {
     void *(*hos_data_at_offset)(struct vr_packet *, unsigned short);
     void *(*hos_pheader_pointer)(struct vr_packet *, unsigned short,
                                  void *);
-    int  (*hos_pull_inner_headers)(struct vr_ip *, struct vr_packet *,
+    int  (*hos_pull_inner_headers)(struct vr_packet *,
                                    unsigned short, unsigned short *,
                                    int (*is_label_l2)(unsigned int,
                                        unsigned int, unsigned short *));
-    int  (*hos_pcow)(struct vr_packet *, unsigned short); 
-    __u16 (*hos_get_udp_src_port)(struct vr_packet *, 
-                                  struct vr_forwarding_md *, unsigned short);
+    int  (*hos_pcow)(struct vr_packet *, unsigned short);
+    uint16_t (*hos_get_udp_src_port)(struct vr_packet *,
+                                     struct vr_forwarding_md *,
+                                     unsigned short);
     int (*hos_pkt_from_vm_tcp_mss_adj)(struct vr_packet *, unsigned short);
-    int  (*hos_pull_inner_headers_fast)(struct vr_ip *, struct vr_packet *,
+    int  (*hos_pull_inner_headers_fast)(struct vr_packet *,
                                         unsigned char, int
                                         (*is_label_l2)(unsigned int,
-                                            unsigned int, unsigned short *), 
+                                            unsigned int, unsigned short *),
                                         int *, int *);
+    int (*hos_pkt_may_pull)(struct vr_packet *, unsigned int);
+    int (*hos_gro_process)(struct vr_packet *, struct vr_interface *, bool);
+    void (*hos_add_mpls)(struct vrouter *, unsigned);
+    void (*hos_del_mpls)(struct vrouter *, unsigned);
 };
 
+#define vr_printf                       vrouter_host->hos_printf
 #define vr_malloc                       vrouter_host->hos_malloc
 #define vr_zalloc                       vrouter_host->hos_zalloc
 #define vr_free                         vrouter_host->hos_free
@@ -119,6 +130,7 @@ struct host_os {
 #define vr_pcopy                        vrouter_host->hos_pcopy
 #define vr_pfrag_len                    vrouter_host->hos_pfrag_len
 #define vr_phead_len                    vrouter_host->hos_phead_len
+#define vr_pgso_size                    vrouter_host->hos_pgso_size
 #define vr_pset_data                    vrouter_host->hos_pset_data
 #define vr_get_cpu                      vrouter_host->hos_get_cpu
 #define vr_schedule_work                vrouter_host->hos_schedule_work
@@ -139,17 +151,19 @@ struct host_os {
 #define vr_pull_inner_headers_fast      vrouter_host->hos_pull_inner_headers_fast
 #define vr_get_udp_src_port             vrouter_host->hos_get_udp_src_port
 #define vr_pkt_from_vm_tcp_mss_adj      vrouter_host->hos_pkt_from_vm_tcp_mss_adj
+#define vr_pkt_may_pull                 vrouter_host->hos_pkt_may_pull
+#define vr_gro_process                  vrouter_host->hos_gro_process
 
 struct vrouter {
-    unsigned int vr_num_if;
     unsigned char vr_vrrp_mac[VR_ETHER_ALEN];
     unsigned char vr_mac[VR_ETHER_ALEN];
     unsigned int vr_ip;
 
-    unsigned int vr_max_interfaces;
     struct vr_interface **vr_interfaces;
+    unsigned int vr_max_interfaces;
+
     unsigned int vr_max_nexthops;
-    struct vr_nexthop **vr_nexthops;
+    struct vr_btable *vr_nexthops;
     struct vr_rtable *vr_inet_rtable;
     struct vr_rtable *vr_inet6_rtable;
     struct vr_rtable *vr_inet_mcast_rtable;
@@ -161,7 +175,7 @@ struct vrouter {
     unsigned int vr_flow_table_info_size;
 
     unsigned int vr_max_labels;
-    struct vr_nexthop **vr_ilm;
+    struct vr_btable *vr_ilm;
 
     unsigned int vr_max_mirror_indices;
     struct vr_mirror_entry **vr_mirrors;
@@ -174,6 +188,9 @@ struct vrouter {
     struct vr_timer *vr_fragment_otable_scanner;
 
     uint64_t **vr_pdrop_stats;
+
+    uint16_t vr_link_local_ports_size;
+    unsigned char *vr_link_local_ports;
 
     struct vr_interface *vr_agent_if;
     struct vr_interface *vr_host_if;
@@ -191,6 +208,7 @@ extern struct host_os *vrouter_host;
 extern struct vrouter *vrouter_get(unsigned int);
 extern int vrouter_init(void);
 extern int vr_module_error(int, const char *, int, int);
+extern int vhost_init(void);
 
 #ifdef __cplusplus
 }

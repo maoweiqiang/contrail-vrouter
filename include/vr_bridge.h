@@ -5,6 +5,7 @@
 #define __VR_BRIDGE_H__
 
 #include "vr_defs.h"
+#include "vrouter.h"
 
 #define VR_MAC_COPY(dst, src) { \
     ((uint16_t *)(dst))[0] = ((uint16_t *)(src))[0]; \
@@ -34,14 +35,10 @@
      (((uint16_t *)dst)[2] == 0xffff))  \
 
 #define IS_MAC_BMCAST(dst) \
-     (((uint8_t *)dst)[0]& 0x1) 
+     (((uint8_t *)dst)[0]& 0x1)
 
-#define VR_BE_FLAG_VALID                 0x01
-#define VR_BE_FLAG_LABEL_VALID           0x02
+#define VR_BE_INVALID_INDEX              ((unsigned int)-1)
 
-
-unsigned int
-vr_bridge_input(struct vrouter *, unsigned short , struct vr_packet *, 
-                            struct vr_forwarding_md *);
+extern char vr_bcast_mac[];
 
 #endif

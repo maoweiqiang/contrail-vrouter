@@ -5,6 +5,7 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 #include <vr_os.h>
+#include <vrouter.h>
 #include "vr_message.h"
 
 static char *
@@ -56,10 +57,14 @@ vr_message_request(struct vr_message *message)
         return 0;
 
     if (vr_not_ready)
-        return -EBADFD;
+        return -ENETRESET;
 
     if (vr_not_ready)
+#if defined(__FreeBSD__)
+        return -EBADF;
+#else
         return -EBADFD;
+#endif
 
     message_h.vm_proto->mproto_decode(message->vr_message_buf,
             message->vr_message_len, NULL, NULL);
@@ -76,7 +81,7 @@ vr_message_queue_response(char *buf, int len)
         return -ENOMEM;
 
     response->vr_message_buf = buf;
-    response->vr_message_len = len;;
+    response->vr_message_len = len;
     vr_queue_enqueue(&message_h.vm_response_queue,
             &response->vr_message_queue);
 
@@ -166,8 +171,6 @@ vr_message_process_response(int (*cb)(void *, unsigned int, void *),
     while ((response = vr_message_dequeue_response())) {
         proto->mproto_decode(response->vr_message_buf,
                 response->vr_message_len, cb, cb_arg);
-        if (response->vr_message_buf)
-            vr_mtrans_free(response->vr_message_buf);
         vr_message_free(response);
     }
 

@@ -19,6 +19,9 @@ extern "C" {
 #define IS_LINK_LOCAL_IP(ip) \
     ((ntohl(ip) & METADATA_IP_MASK) == METADATA_IP_SUBNET)
 
+#define RT_IP_ADDR_SIZE(family) \
+    ((family == AF_INET6)?16:4)
+
 struct vrouter;
 struct rtable_fspec;
 
@@ -31,7 +34,11 @@ struct vr_vrf_stats {
     uint64_t vrf_discards;
     uint64_t vrf_resolves;
     uint64_t vrf_receives;
+    uint64_t vrf_l2_receives;
     uint64_t vrf_ecmp_composites;
+    uint64_t vrf_vrf_translates;
+    uint64_t vrf_encap_composites;
+    uint64_t vrf_evpn_composites;
     uint64_t vrf_l3_mcast_composites;
     uint64_t vrf_l2_mcast_composites;
     uint64_t vrf_fabric_composites;
@@ -43,6 +50,14 @@ struct vr_vrf_stats {
     uint64_t vrf_encaps;
     uint64_t vrf_gros;
     uint64_t vrf_diags;
+    uint64_t vrf_vxlan_tunnels;
+    uint64_t vrf_arp_virtual_proxy;
+    uint64_t vrf_arp_virtual_stitch;
+    uint64_t vrf_arp_virtual_flood;
+    uint64_t vrf_arp_physical_stitch;
+    uint64_t vrf_arp_tor_proxy;
+    uint64_t vrf_arp_physical_flood;
+    uint64_t vrf_uuc_floods;
 };
 
 struct vr_route {
@@ -60,8 +75,7 @@ struct vr_route {
 struct vr_rtable {
     int (*algo_add)(struct vr_rtable *, struct vr_route_req *);
     int (*algo_del)(struct vr_rtable *, struct vr_route_req *);
-    struct vr_nexthop *(*algo_lookup)(unsigned int, struct vr_route_req *,
-            struct vr_packet *);
+    struct vr_nexthop *(*algo_lookup)(unsigned int, struct vr_route_req *);
     int (*algo_get)(unsigned int, struct vr_route_req *);
     int (*algo_dump)(struct vr_rtable *, struct vr_route_req *);
     struct vr_vrf_stats *(*algo_stats)(unsigned short, unsigned int);
@@ -85,13 +99,15 @@ struct rtable_fspec {
     int (*route_del)(struct rtable_fspec *, struct vr_route_req *);
     int (*route_dump)(struct rtable_fspec *, struct vr_route_req *);
 
-    algo_init_decl algo_init[RT_MAX];
-    algo_deinit_decl algo_deinit[RT_MAX];
+    algo_init_decl algo_init;
+    algo_deinit_decl algo_deinit;
 };
 
 extern int vr_fib_init(struct vrouter *);
 extern void vr_fib_exit(struct vrouter *, bool);
 extern int vr_route_add(vr_route_req *);
+extern struct vr_nexthop *(*vr_inet_route_lookup)(unsigned int,
+               struct vr_route_req *);
 
 #ifdef __cplusplus
 }

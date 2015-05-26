@@ -8,13 +8,13 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <errno.h>
 
-#include <asm/types.h>
 #include <sys/socket.h>
-
+#if defined(__linux__)
+#include <asm/types.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/genetlink.h>
@@ -23,6 +23,12 @@
 #include <stdint.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#elif defined(__FreeBSD__)
+#include <net/if.h>
+#include <netinet/in.h>
+#include <net/ethernet.h>
+#endif
+
 #include "udp_util.h"
 
 #include "host/vr_host.h"
@@ -106,8 +112,8 @@ udp_recvmsg(struct udp_client *cl)
     struct iovec iov;
 
     memset(&msg, 0, sizeof(msg));
-
     memset(&sa, 0, sizeof(sa));
+
     sa.sin_family = AF_INET;
     msg.msg_name = &sa;
     msg.msg_namelen = sizeof(sa);

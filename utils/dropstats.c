@@ -9,14 +9,13 @@
 #include <string.h>
 #include <errno.h>
 #include <inttypes.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <getopt.h>
 
-#include <asm/types.h>
-
 #include <sys/types.h>
 #include <sys/socket.h>
+#if defined(__linux__)
 #include <asm/types.h>
 
 #include <linux/netlink.h>
@@ -25,12 +24,18 @@
 
 #include <net/if.h>
 #include <netinet/ether.h>
+#elif defined(__FreeBSD__)
+#include <net/if.h>
+#include <net/ethernet.h>
+#endif
 
 #include "vr_types.h"
 #include "vr_message.h"
 #include "vr_nexthop.h"
 #include "vr_genetlink.h"
 #include "nl_util.h"
+#include "vr_os.h"
+#include "ini_parser.h"
 
 static struct nl_client *cl;
 static int resp_code;
@@ -45,8 +50,8 @@ vr_drop_stats_req_process(void *s_req)
 
     printf("GARP                          %" PRIu64 "\n",
             stats->vds_garp_from_vm);
-    printf("ARP notme                     %" PRIu64 "\n",
-            stats->vds_arp_not_me);
+    printf("ARP no where to go            %" PRIu64 "\n",
+            stats->vds_arp_no_where_to_go);
     printf("Invalid ARPs                  %" PRIu64 "\n",
             stats->vds_invalid_arp);
     printf("\n");
@@ -127,12 +132,20 @@ vr_drop_stats_req_process(void *s_req)
             stats->vds_cksum_err);
     printf("No Fmd                        %" PRIu64 "\n",
             stats->vds_no_fmd);
-    printf("Ivalid VNID                   %" PRIu64 "\n",
+    printf("Invalid VNID                  %" PRIu64 "\n",
             stats->vds_invalid_vnid);
     printf("Fragment errors               %" PRIu64 "\n",
             stats->vds_frag_err);
     printf("Invalid Source                %" PRIu64 "\n",
             stats->vds_invalid_source);
+    printf("Jumbo Mcast Pkt with DF Bit   %" PRIu64 "\n",
+            stats->vds_mcast_df_bit);
+    printf("ARP No Route                  %" PRIu64 "\n",
+            stats->vds_arp_no_route);
+    printf("ARP Reply No Route            %" PRIu64 "\n",
+            stats->vds_arp_reply_no_route);
+    printf("No L2 Route                   %" PRIu64 "\n",
+            stats->vds_l2_no_route);
     printf("\n");
     return;
 }
@@ -148,7 +161,7 @@ vr_response_process(void *s)
     if (stats_resp->resp_code < 0) {
         printf("Error %s in kernel operation\n", strerror(stats_resp->resp_code));
         exit(-1);
-    } 
+    }
 
     return;
 }
@@ -179,7 +192,7 @@ vr_build_netlink_request(vr_drop_stats_req *req)
         return ret;
 
     attr_len = nl_get_attr_hdr_size();
-    ret = sandesh_encode(req, "vr_drop_stats_req", vr_find_sandesh_info, 
+    ret = sandesh_encode(req, "vr_drop_stats_req", vr_find_sandesh_info,
                              (nl_get_buf_ptr(cl) + attr_len),
                              (nl_get_buf_len(cl) - attr_len), &error);
 
@@ -203,7 +216,7 @@ vr_send_one_message(void)
     if (ret <= 0)
         return 0;
 
-    while ((ret = nl_recvmsg(cl)) > 0) {
+    if((ret = nl_recvmsg(cl)) > 0) {
         resp = nl_parse_reply(cl);
         if (resp->nl_op == SANDESH_REQUEST)
             sandesh_decode(resp->nl_data, resp->nl_len, vr_find_sandesh_info, &ret);
@@ -219,7 +232,7 @@ vr_drop_stats_op(void)
     return;
 }
 
-static int 
+static int
 vr_get_drop_stats(void)
 {
     int ret;
@@ -277,8 +290,15 @@ main(int argc, char *argv[])
         exit(1);
     }
 
-    ret = nl_socket(cl, NETLINK_GENERIC);    
+    parse_ini_file();
+
+    ret = nl_socket(cl, get_domain(), get_type(), get_protocol());
     if (ret <= 0) {
+       exit(1);
+    }
+
+    ret = nl_connect(cl, get_ip(), get_port());
+    if (ret < 0) {
        exit(1);
     }
 

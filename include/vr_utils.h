@@ -19,6 +19,12 @@ struct vn_if {
     unsigned int if_flags;
 };
 
+struct vr_util_flags {
+    unsigned int vuf_flag;
+    char *vuf_flag_symbol;
+    char *vuf_flag_string;
+};
+
 #ifdef __cplusplus
 }
 #endif

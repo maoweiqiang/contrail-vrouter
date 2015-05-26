@@ -3,7 +3,10 @@
  *
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
+#include <stdarg.h>
+
 #include "vr_os.h"
+#include "vr_packet.h"
 #include "vr_proto.h"
 #include "vrouter.h"
 #include <sys/time.h>
@@ -12,14 +15,11 @@
 #include "host/vr_host_packet.h"
 #include "ulinux.h"
 
-#define PAGE_SIZE	4096
+#define PAGE_SIZE    4096
 unsigned int vr_num_cpus = 1;
 
 static bool vr_host_inited = false;
 static unsigned int vr_message_proto;
-
-extern int vr_flow_entries;
-extern int vr_oflow_entries;
 
 extern void vr_diet_message_proto_exit(void);
 extern int vr_diet_message_proto_init(void);
@@ -46,20 +46,39 @@ vr_lib_create_timer(struct vr_timer *vtimer)
 static void
 vr_lib_delete_timer(struct vr_timer *vtimer)
 {
-	vr_free(vtimer->vt_os_arg);
+    vr_free(vtimer->vt_os_arg);
 }
 
 static void *
 vr_lib_page_alloc(unsigned int size)
 {
-	return malloc(PAGE_SIZE);
+    int pages;
+
+    pages = size / PAGE_SIZE;
+    if (size % PAGE_SIZE)
+        pages++;
+
+    return calloc(pages, PAGE_SIZE);
 }
 
 static void
 vr_lib_page_free(void *address, unsigned int size)
 {
-	if (address)
-		free(address);
+    if (address)
+	free(address);
+}
+
+static int
+vr_lib_printf(const char *format, ...)
+{
+    int printed;
+    va_list args;
+
+    va_start(args, format);
+    printed = printf(format, args);
+    va_end(args);
+
+    return printed;
 }
 
 static void *
@@ -219,6 +238,7 @@ vr_lib_delay_op(void)
 }
 
 struct host_os vr_lib_host = {
+    .hos_printf             =       vr_lib_printf,
     .hos_malloc             =       vr_lib_malloc,
     .hos_zalloc             =       vr_lib_zalloc,
     .hos_free               =       vr_lib_free,

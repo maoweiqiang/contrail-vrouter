@@ -4,17 +4,25 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 #include <vr_os.h>
+#include <vr_types.h>
+#include <vr_packet.h>
+#include "vr_interface.h"
 #include "vr_message.h"
 #include "vr_sandesh.h"
 #include "vr_mpls.h"
+#include "vr_bridge.h"
+#include "vr_datapath.h"
+#include "vr_btable.h"
+
+unsigned int vr_mpls_labels = VR_DEF_LABELS;
 
 struct vr_nexthop *
 __vrouter_get_label(struct vrouter *router, unsigned int label)
 {
-    if (!router || label > router->vr_max_labels)
+    if (!router || label >= router->vr_max_labels)
         return NULL;
 
-    return router->vr_ilm[label];
+    return *(struct vr_nexthop **)vr_btable_get(router->vr_ilm, label);
 }
 
 static struct vr_nexthop *
@@ -25,11 +33,45 @@ vrouter_get_label(unsigned int rid, unsigned int label)
     return __vrouter_get_label(router, label);
 }
 
+static int
+__vrouter_set_label(struct vrouter *router, unsigned int label,
+        struct vr_nexthop *nh)
+{
+    struct vr_nexthop **nh_p;
+
+    nh_p = (struct vr_nexthop **)vr_btable_get(router->vr_ilm, label);
+    if (!nh_p)
+        return -EINVAL;
+
+    *nh_p = nh;
+
+    return 0;
+}
+
+int
+__vr_mpls_del(struct vrouter *router, unsigned int label)
+{
+    struct vr_nexthop *nh;
+
+    /* hardware packet filtering (Flow Director) support */
+    nh = __vrouter_get_label(router, label);
+    if (nh) {
+        if (vrouter_host->hos_del_mpls
+            && nh->nh_type == NH_ENCAP && !(nh->nh_flags & NH_FLAG_MCAST))
+            vrouter_host->hos_del_mpls(router, label);
+
+        vrouter_put_nexthop(nh);
+    }
+
+    return __vrouter_set_label(router, label, NULL);
+}
+
 int
 vr_mpls_del(vr_mpls_req *req)
 {
-    struct vrouter *router;
     int ret = 0;
+
+    struct vrouter *router;
 
     router = vrouter_get(req->mr_rid);
     if (!router) {
@@ -37,15 +79,12 @@ vr_mpls_del(vr_mpls_req *req)
         goto generate_resp;
     }
 
-    if (req->mr_label > (int)router->vr_max_labels) {
+    if ((unsigned int)req->mr_label >= router->vr_max_labels) {
         ret = -EINVAL;
         goto generate_resp;
     }
 
-    if (router->vr_ilm[req->mr_label])
-        vrouter_put_nexthop(router->vr_ilm[req->mr_label]);
-
-    router->vr_ilm[req->mr_label] = NULL;
+    ret =  __vr_mpls_del(router, req->mr_label);
 
 generate_resp:
     vr_send_response(ret);
@@ -66,18 +105,31 @@ vr_mpls_add(vr_mpls_req *req)
         goto generate_resp;
     }
 
-    if ((unsigned int)req->mr_label > router->vr_max_labels) {
+    if ((unsigned int)req->mr_label >= router->vr_max_labels) {
         ret = -EINVAL;
         goto generate_resp;
     }
+
+    ret = __vr_mpls_del(router, req->mr_label);
+    if (ret)
+        goto generate_resp;
 
     nh = vrouter_get_nexthop(req->mr_rid, req->mr_nhid);
-    if (!nh)  {
+    if (!nh) {
         ret = -EINVAL;
         goto generate_resp;
     }
 
-    router->vr_ilm[req->mr_label] = nh;
+    ret = __vrouter_set_label(router, req->mr_label, nh);
+    if (ret) {
+        vrouter_put_nexthop(nh);
+        goto generate_resp;
+    }
+
+    /* hardware packet filtering (Flow Director) support */
+    if (vrouter_host->hos_add_mpls
+        && nh->nh_type == NH_ENCAP && !(nh->nh_flags & NH_FLAG_MCAST))
+        vrouter_host->hos_add_mpls(router, req->mr_label);
 
 generate_resp:
     vr_send_response(ret);
@@ -87,7 +139,7 @@ generate_resp:
 
 static void
 vr_mpls_make_req(vr_mpls_req *req, struct vr_nexthop *nh,
-                unsigned short label)
+                unsigned int label)
 {
     req->mr_rid = 0;
     req->mr_nhid = nh->nh_id;
@@ -118,7 +170,7 @@ vr_mpls_dump(vr_mpls_req *r)
 
     for (i = (unsigned int)(r->mr_marker + 1);
             i < router->vr_max_labels; i++) {
-        nh = router->vr_ilm[i];
+        nh = __vrouter_get_label(router, i);
         if (nh) {
            vr_mpls_make_req(&req, nh, i);
            ret = vr_message_dump_object(dumper, VR_MPLS_OBJECT_ID, &req);
@@ -141,17 +193,26 @@ vr_mpls_get(vr_mpls_req *req)
     struct vrouter *router;
 
     router = vrouter_get(req->mr_rid);
-    if (!router || req->mr_label > (int)router->vr_max_labels) {
+    if (!router) {
         ret = -ENODEV;
-    } else {
-        nh = vrouter_get_label(req->mr_rid, req->mr_label);
-        if (!nh)
-            ret = -ENOENT;
+        goto generate_response;
     }
 
-    if (!ret)
-        vr_mpls_make_req(req, nh, req->mr_label);
-    else
+    if (((unsigned int)req->mr_label >= router->vr_max_labels)) {
+        ret = -EINVAL;
+        goto generate_response;
+    }
+
+    nh = vrouter_get_label(req->mr_rid, req->mr_label);
+    if (!nh) {
+        ret = -ENOENT;
+        goto generate_response;
+    }
+
+    vr_mpls_make_req(req, nh, req->mr_label);
+
+generate_response:
+    if (ret)
         req = NULL;
 
     vr_message_response(VR_MPLS_OBJECT_ID, req, ret);
@@ -205,7 +266,7 @@ vr_mpls_tunnel_type(unsigned int label, unsigned int control_data, unsigned
         goto fail;
     }
 
-    nh = router->vr_ilm[label];
+    nh = __vrouter_get_label(router, label);
     if(!nh) {
         res = VP_DROP_INVALID_NH;
         goto fail;
@@ -215,12 +276,13 @@ vr_mpls_tunnel_type(unsigned int label, unsigned int control_data, unsigned
     case AF_INET:
         return PKT_MPLS_TUNNEL_L3;
     case AF_BRIDGE:
-        return PKT_MPLS_TUNNEL_L2_UCAST;
-    case AF_UNSPEC:
-        if (control_data == VR_L2_MCAST_CTRL_DATA)
-            return PKT_MPLS_TUNNEL_L2_MCAST;
-        else 
-            return PKT_MPLS_TUNNEL_L3;
+        if (nh->nh_type != NH_COMPOSITE) {
+            return PKT_MPLS_TUNNEL_L2_UCAST;
+        }
+        if (label < VR_MAX_UCAST_LABELS) {
+            return PKT_MPLS_TUNNEL_L2_MCAST_EVPN;
+        }
+        return PKT_MPLS_TUNNEL_L2_MCAST;
     default:
         res = VP_DROP_INVALID_NH;
     }
@@ -236,13 +298,11 @@ vr_mpls_input(struct vrouter *router, struct vr_packet *pkt,
         struct vr_forwarding_md *fmd)
 {
     unsigned int label;
-    unsigned short vrf;
+    unsigned short drop_reason;
     struct vr_nexthop *nh;
-    unsigned char *data;
     struct vr_ip *ip;
-    unsigned short drop_reason = 0;
     struct vr_forwarding_md c_fmd;
-    int ttl;
+    int ttl, l2_offset = 0;
 
     if (!fmd) {
         vr_init_forwarding_md(&c_fmd);
@@ -270,18 +330,51 @@ vr_mpls_input(struct vrouter *router, struct vr_packet *pkt,
     pkt->vp_ttl = ttl;
 
     /* drop the TOStack label */
-    data = pkt_pull(pkt, VR_MPLS_HDR_LEN);
-    if (!data) {
+    if (!pkt_pull(pkt, VR_MPLS_HDR_LEN)) {
         drop_reason = VP_DROP_PULL;
         goto dropit;
     }
 
-    /* this is the new network header and inner network header too*/
-    pkt_set_network_header(pkt, pkt->vp_data);
-    pkt_set_inner_network_header(pkt, pkt->vp_data);
-
-    nh = router->vr_ilm[label];
+    nh = __vrouter_get_label(router, label);
     if (!nh) {
+        drop_reason = VP_DROP_INVALID_LABEL;
+        goto dropit;
+    }
+
+    /*
+     * Mark it for GRO. Diag, L2 and multicast nexthops unmark if
+     * required
+     */
+    if (vr_perfr)
+        pkt->vp_flags |= VP_FLAG_GRO;
+
+    /* Reset the flags which get defined below */
+    pkt->vp_flags &= ~VP_FLAG_MULTICAST;
+    fmd->fmd_vlan = VLAN_ID_INVALID;
+
+    if (nh->nh_family == AF_INET) {
+        ip = (struct vr_ip *)pkt_data(pkt);
+        if (!vr_ip_is_ip6(ip))
+            pkt->vp_type = VP_TYPE_IP;
+        else
+            pkt->vp_type = VP_TYPE_IP6;
+
+        pkt_set_network_header(pkt, pkt->vp_data);
+        pkt_set_inner_network_header(pkt, pkt->vp_data);
+
+    } else if (nh->nh_family == AF_BRIDGE) {
+
+        if (nh->nh_type == NH_COMPOSITE) {
+            if (label >= VR_MAX_UCAST_LABELS)
+                l2_offset = VR_L2_MCAST_CTRL_DATA_LEN + VR_VXLAN_HDR_LEN;
+        }
+
+        if (vr_pkt_type(pkt, l2_offset, fmd) < 0) {
+            drop_reason = VP_DROP_INVALID_PACKET;
+            goto dropit;
+        }
+
+    } else {
         drop_reason = VP_DROP_INVALID_NH;
         goto dropit;
     }
@@ -294,20 +387,13 @@ vr_mpls_input(struct vrouter *router, struct vr_packet *pkt,
      * will forward the packet in the vrf in which it came i.e fabric
      */
     if (nh->nh_vrf >= 0)
-        vrf = nh->nh_vrf;
+        fmd->fmd_dvrf = nh->nh_vrf;
     else if (nh->nh_dev)
-        vrf = nh->nh_dev->vif_vrf;
+        fmd->fmd_dvrf = nh->nh_dev->vif_vrf;
     else
-        vrf = pkt->vp_if->vif_vrf;
+        fmd->fmd_dvrf = pkt->vp_if->vif_vrf;
 
-    /*
-     * Mark it for GRO. Diag, L2 and multicast nexthops unmark if
-     * required
-     */
-    if (vr_perfr) 
-        pkt->vp_flags |= VP_FLAG_GRO;
-
-    nh_output(vrf, pkt, nh, fmd);
+    nh_output(pkt, nh, fmd);
 
     return 0;
 
@@ -320,19 +406,21 @@ void
 vr_mpls_exit(struct vrouter *router, bool soft_reset)
 {
     unsigned int i;
+    struct vr_nexthop *nh;
 
     if (!router->vr_max_labels || !router->vr_ilm)
         return;
 
     for (i = 0; i < router->vr_max_labels; i++) {
-        if (router->vr_ilm[i]) {
-            vrouter_put_nexthop(router->vr_ilm[i]);
-            router->vr_ilm[i] = NULL;
+        nh = __vrouter_get_label(router, i);
+        if (nh) {
+            vrouter_put_nexthop(nh);
+            __vrouter_set_label(router, i, NULL);
         }
     }
 
     if (soft_reset == false) {
-        vr_free(router->vr_ilm);
+        vr_btable_free(router->vr_ilm);
         router->vr_ilm = NULL;
         router->vr_max_labels = 0;
     }
@@ -346,9 +434,10 @@ vr_mpls_init(struct vrouter *router)
     int ilm_memory;
 
     if (!router->vr_ilm) {
-        router->vr_max_labels = VR_MAX_LABELS;
+        router->vr_max_labels = vr_mpls_labels;
         ilm_memory = sizeof(struct vr_nexthop *) * router->vr_max_labels;
-        router->vr_ilm = vr_zalloc(ilm_memory);
+        router->vr_ilm = vr_btable_alloc(router->vr_max_labels,
+                sizeof(struct vr_nexthop *));
         if (!router->vr_ilm)
             return vr_module_error(-ENOMEM, __FUNCTION__,
                     __LINE__, ilm_memory);

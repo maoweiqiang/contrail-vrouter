@@ -8,7 +8,9 @@
 
 #include "vr_types.h"
 #include "vr_os.h"
+#include "vr_packet.h"
 #include "vr_message.h"
+#include "vr_interface.h"
 
 #include "host/vr_host.h"
 #include "host/vr_host_packet.h"
@@ -22,6 +24,26 @@ extern int vrouter_host_init(unsigned int);
 
 static char *uvr_agent_buffer;
 static int uvr_agent_fd = -1;
+
+void
+get_random_bytes(void *buf, int nbytes)
+{
+}
+
+
+uint32_t
+jhash(void *key, uint32_t length, uint32_t initval)
+{
+    uint32_t ret;
+    int i;
+    unsigned char *data = (unsigned char *)key;
+
+    for (i = 0; i < length; i ++)
+        ret +=  data[i];
+
+    return ret;
+}
+
 
 static int
 uvrouter_agent_rx(void *arg)

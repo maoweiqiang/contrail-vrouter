@@ -4,8 +4,10 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 #include "vr_os.h"
+#include "vr_types.h"
 #include "vr_message.h"
 #include "vr_sandesh.h"
+#include "vrouter.h"
 
 struct sandesh_object_md sandesh_md[] = {
     [VR_NULL_OBJECT_ID]         =   {
@@ -33,7 +35,8 @@ struct sandesh_object_md sandesh_md[] = {
         .obj_type_string        =       "vr_mirror_req",
     },
     [VR_FLOW_OBJECT_ID]         =   {
-        .obj_len                =       4 * sizeof(vr_flow_req),
+        .obj_len                =       ((4 * sizeof(vr_flow_req)) +
+                    (VR_MAX_CPUS * sizeof(unsigned int))),
         .obj_type_string        =       "vr_flow_req",
     },
     [VR_VRF_ASSIGN_OBJECT_ID]     =   {
@@ -55,6 +58,10 @@ struct sandesh_object_md sandesh_md[] = {
     [VR_VXLAN_OBJECT_ID]     =   {
         .obj_len                =       4 * sizeof(vr_vxlan_req),
         .obj_type_string        =       "vr_vxlan_req",
+    },
+    [VR_VROUTER_OPS_OBJECT_ID]     =   {
+        .obj_len                =       4 * sizeof(vrouter_ops),
+        .obj_type_string        =       "vrouter_ops",
     },
 };
 

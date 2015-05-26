@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
-	
+
 enum sandesh_op {
     ADD,
     GET,
@@ -40,7 +40,7 @@ buffer sandesh vr_nexthop_req {
     13: i16         nhr_tun_dport;
     14: i32         nhr_ref_cnt;
     15: i32         nhr_marker;
-    16: i16         nhr_flags;
+    16: u32         nhr_flags;
     17: list<byte>  nhr_encap;
     18: list<i32>   nhr_nh_list;
     19: i32         nhr_label;
@@ -75,6 +75,10 @@ buffer sandesh vr_interface_req {
    25: i32          vifr_parent_vif_idx;
    26: i16          vifr_nh_id;
    27: i32          vifr_cross_connect_idx;
+   28: list<byte>   vifr_src_mac;
+   29: i32          vifr_bridge_idx;
+   30: i16          vifr_ovlan_id;
+   31: byte         vifr_transport;
 }
 
 buffer sandesh vr_vxlan_req {
@@ -88,23 +92,22 @@ buffer sandesh vr_route_req {
     1:  sandesh_op  h_op;
     2:  i32         rtr_vrf_id;
     3:  i32         rtr_family;
-    4:  i32         rtr_rt_type;
-    5:  i32         rtr_prefix;
-    6:  i32         rtr_src;
-    7:  i32         rtr_prefix_len;
-    8:  i16         rtr_rid;
-    9:  i16         rtr_label_flags;
-   10:  i32         rtr_label;
-   11:  i32         rtr_nh_id;
-   12:  i32         rtr_marker;
-   13:  i32         rtr_marker_plen;
-   14:  list<byte>  rtr_mac;
-   15:  i32         rtr_replace_plen;
+    4:  list<byte>  rtr_prefix;
+    5:  i32         rtr_prefix_len;
+    6:  i16         rtr_rid;
+    7:  i16         rtr_label_flags;
+    8:  i32         rtr_label;
+    9:  i32         rtr_nh_id;
+   10:  list<byte>  rtr_marker;
+   11:  i32         rtr_marker_plen;
+   12:  list<byte>  rtr_mac;
+   13:  i32         rtr_replace_plen;
+   14:  i32         rtr_index;
 }
 
 buffer sandesh vr_mpls_req {
     1: sandesh_op   h_op;
-    2: i16          mr_label;
+    2: i32          mr_label;
     3: i16          mr_rid;
     4: i32          mr_nhid;
     5: i32          mr_marker;
@@ -129,8 +132,8 @@ buffer sandesh vr_flow_req {
     6: i32          fr_ftable_size;
     7: i16          fr_ftable_dev;
     8: i32          fr_rindex;
-    9: i32          fr_flow_sip;
-   10: i32          fr_flow_dip;
+    9: i32          fr_family;
+   10: list<byte>   fr_flow_ip;
    11: i16          fr_flow_sport;
    12: i16          fr_flow_dport;
    13: byte         fr_flow_proto;
@@ -142,9 +145,17 @@ buffer sandesh vr_flow_req {
    19: i16          fr_mir_sport;
    20: list<byte>   fr_pcap_meta_data;
    21: i16          fr_mir_vrf;
-   22: i16          fr_ecmp_nh_index;
+   22: i32          fr_ecmp_nh_index;
    23: i32          fr_src_nh_index;
-   24: i16          fr_flow_nh_id;
+   24: i32          fr_flow_nh_id;
+   25: i16          fr_drop_reason;
+   26: string       fr_file_path;
+   27: i64          fr_processed;
+   28: i64          fr_created;
+   29: i64          fr_added;
+   30: i32          fr_cpus;
+   31: i32          fr_hold_oflows;
+   32: list<i32>    fr_hold_stat;
 }
 
 buffer sandesh vr_vrf_assign_req {
@@ -154,7 +165,7 @@ buffer sandesh vr_vrf_assign_req {
     4:  i16                 var_vif_vrf;
     5:  i16                 var_vlan_id;
     6:  i16                 var_marker;
-    7:  i16                 var_nh_id;
+    7:  i32                 var_nh_id;
 }
 
 buffer sandesh vr_vrf_stats_req {
@@ -167,18 +178,28 @@ buffer sandesh vr_vrf_stats_req {
     7:  i64                 vsr_resolves;
     8:  i64                 vsr_receives;
     9:  i64                 vsr_ecmp_composites;
-   10:  i64                 vsr_l3_mcast_composites;
-   11:  i64                 vsr_l2_mcast_composites;
-   12:  i64                 vsr_fabric_composites;
-   13:  i64                 vsr_multi_proto_composites;
-   14:  i64                 vsr_udp_tunnels;
-   15:  i64                 vsr_udp_mpls_tunnels;
-   16:  i64                 vsr_gre_mpls_tunnels;
-   17:  i64                 vsr_l2_encaps;
-   18:  i64                 vsr_encaps;
-   19:  i16                 vsr_marker;
-   20:  i64                 vsr_gros;
-   21:  i64                 vsr_diags;
+   10:  i64                 vsr_l2_mcast_composites;
+   11:  i64                 vsr_fabric_composites;
+   12:  i64                 vsr_udp_tunnels;
+   13:  i64                 vsr_udp_mpls_tunnels;
+   14:  i64                 vsr_gre_mpls_tunnels;
+   15:  i64                 vsr_l2_encaps;
+   16:  i64                 vsr_encaps;
+   17:  i16                 vsr_marker;
+   18:  i64                 vsr_gros;
+   19:  i64                 vsr_diags;
+   20:  i64                 vsr_encap_composites;
+   21:  i64                 vsr_evpn_composites;
+   22:  i64                 vsr_vrf_translates;
+   23:  i64                 vsr_vxlan_tunnels;
+   24:  i64                 vsr_arp_virtual_proxy;
+   25:  i64                 vsr_arp_virtual_stitch;
+   26:  i64                 vsr_arp_virtual_flood;
+   27:  i64                 vsr_arp_physical_stitch;
+   28:  i64                 vsr_arp_tor_proxy;
+   29:  i64                 vsr_arp_physical_flood;
+   30:  i64                 vsr_l2_receives;
+   31:  i64                 vsr_uuc_floods;
 }
 
 buffer sandesh vr_response {
@@ -188,6 +209,17 @@ buffer sandesh vr_response {
 
 buffer sandesh vrouter_ops {
     1: sandesh_op   h_op;
+    2: i32          vo_rid;
+    3: i32          vo_mpls_labels;
+    4: i32          vo_nexthops;
+    5: i32          vo_bridge_entries;
+    6: i32          vo_oflow_bridge_entries;
+    7: i32          vo_flow_entries;
+    8: i32          vo_oflow_entries;
+    9: i32          vo_interfaces;
+   10: i32          vo_mirror_entries;
+   11: i32          vo_vrfs;
+   12: string       vo_build_info;
 }
 
 buffer sandesh vr_drop_stats_req {
@@ -196,7 +228,7 @@ buffer sandesh vr_drop_stats_req {
     3:  i64             vds_discard;
     4:  i64             vds_pull;
     5:  i64             vds_invalid_if;
-    6:  i64             vds_arp_not_me;
+    6:  i64             vds_arp_no_where_to_go;
     7:  i64             vds_garp_from_vm;
     8:  i64             vds_invalid_arp;
     9:  i64             vds_trap_no_if;
@@ -235,4 +267,8 @@ buffer sandesh vr_drop_stats_req {
     42: i64             vds_invalid_vnid;
     43: i64             vds_frag_err;
     44: i64             vds_invalid_source;
+    45: i64             vds_mcast_df_bit;
+    46: i64             vds_arp_no_route;
+    47: i64             vds_l2_no_route;
+    48: i64             vds_arp_reply_no_route;
 }

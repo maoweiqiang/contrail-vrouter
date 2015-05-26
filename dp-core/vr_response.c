@@ -6,9 +6,12 @@
 
 #include "vr_sandesh.h"
 #include "vr_os.h"
+#include "vr_types.h"
+
+int vr_generate_response(vr_response *, int code, unsigned char *, int);
 
 void
-vr_response_process(void *s_req) 
+vr_response_process(void *s_req)
 {
 }
 

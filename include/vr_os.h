@@ -7,6 +7,7 @@
 #ifndef __VR_OS_H__
 #define __VR_OS_H__
 
+#if defined(__linux__)
 #ifdef __KERNEL__
 
 #include <linux/kernel.h>
@@ -34,7 +35,6 @@
 #include <net/netlink.h>
 #include <net/genetlink.h>
 
-#define vr_printf(format, arg...)   printk(format, ##arg)
 #define ASSERT(x) BUG_ON(!(x));
 
 #else /* __KERNEL */
@@ -48,7 +48,6 @@
 #include <assert.h>
 #include <sys/types.h>
 
-#define vr_printf(format, arg...)   printf(format, ##arg)
 #define ASSERT(x) assert((x));
 
 typedef __signed__ char __s8;
@@ -64,19 +63,34 @@ typedef unsigned int __u32;
 #define false 0
 
 #endif /* __KERNEL__ */
+#endif /* __linux__ */
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <net/if_types.h>
+#include <net/ethernet.h>
+#include <netinet/in.h>
+#include "netlink.h"
+#include "genetlink.h"
 
-#include "vr_defs.h"
-#include "vr_hash.h"
-#include <vrouter.h>
-#include <vr_interface.h>
-#include <vr_nexthop.h>
-#include <vr_route.h>
-#include <vr_mpls.h>
-#include <vr_flow.h>
-#include <vr_bridge.h>
-#include <vr_packet.h>
-#include <vr_mirror.h>
-#include <vr_vxlan.h>
+/*
+ * BSD has no family AF_BRIDGE so to avoid to many ifdef in ksync and
+ * vrouter code it is defined here in the same way as in LINUX
+ */
+#define AF_BRIDGE    7
+
+#if defined(_KERNEL)
+#define vr_printf(format, arg...)   printf(format, ##arg)
+#define ASSERT(x) KASSERT((x), (#x));
+#else
+#include <stdbool.h>
+#include <assert.h>
+#define vr_printf(format, arg...)   printf(format, ##arg)
+#define ASSERT(x) assert((x));
+#endif
+#endif /* __FreeBSD__ */
 
 extern int vrouter_dbg;
 

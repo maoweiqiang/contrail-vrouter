@@ -7,6 +7,7 @@
 #define __VR_PACKET_H__
 
 #include "vr_defs.h"
+#include "vr_flow.h"
 #include "vrouter.h"
 
 /* ethernet header */
@@ -18,14 +19,17 @@
 #define VR_ETHER_PROTO_MAC_OFF  1
 #define VR_ETHER_PROTO_MAC_LEN  2
 
-
 #define VR_IP_PROTO_ICMP        1
 #define VR_IP_PROTO_IGMP        2
 #define VR_IP_PROTO_TCP         6
 #define VR_IP_PROTO_UDP         17
-#define	VR_IP_PROTO_GRE         47
+#define VR_IP_PROTO_GRE         47
+#define VR_IP_PROTO_ICMP6       58
+#define VR_IP_PROTO_SCTP        132
 #define VR_GRE_FLAG_CSUM        (ntohs(0x8000))
-#define VR_GRE_FLAG_KEY         (ntohs(0x2000)) 
+#define VR_GRE_FLAG_KEY         (ntohs(0x2000))
+#define VR_DHCP_SRC_PORT        68
+#define VR_DHCP6_SRC_PORT       546
 
 /* Size of basic GRE header */
 #define VR_GRE_BASIC_HDR_LEN    4
@@ -36,6 +40,8 @@
 /* Size of GRE header with key */
 #define VR_GRE_KEY_HDR_LEN      8
 
+#define VR_DYNAMIC_PORT_START   32768
+#define VR_DYNAMIC_PORT_END     65535
 
 /*
  * Overlay length used for TCP MSS adjust. For UDP outer header, overlay
@@ -49,7 +55,7 @@
 /*
  * Over lay length is going to be ethernet header bytes more incase of L2 packet
  */
-#define VROUTER_OVERLAY_LEN_IN_L2_MODE  62
+#define VROUTER_L2_OVERLAY_LEN  62
 
 
 /* packets originated by DP. For eg: mirrored packets */
@@ -59,7 +65,6 @@
 #define VP_FLAG_FLOW_GET        (1 << 2)
 /* packet already went through one round of policy lookup */
 #define VP_FLAG_FLOW_SET        (1 << 3)
-/* The native packet is multicast packet */
 #define VP_FLAG_MULTICAST       (1 << 4)
 /* Partially checksummed by VM */
 #define VP_FLAG_CSUM_PARTIAL    (1 << 5)
@@ -67,48 +72,66 @@
 #define VP_FLAG_GRO             (1 << 6)
 /* Attempt to do segmentation on inner packet */
 #define VP_FLAG_GSO             (1 << 7)
+/* Diagnostic packet */
+#define VP_FLAG_DIAG            (1 << 8)
 
-/* 
+/*
  * possible 256 values of what a packet can be. currently, this value is
- * used only as an aid in fragmentation
+ * used only as an aid in fragmentation.
  */
 #define VP_TYPE_NULL            0
-#define VP_TYPE_IP              1
-#define VP_TYPE_IPOIP           2
+
+#define VP_TYPE_ARP             1
+#define VP_TYPE_IP              2
 #define VP_TYPE_IP6             3
-#define VP_TYPE_L2              4
-#define VP_TYPE_L2OIP           5
-#define VP_TYPE_VXLAN           6
-#define VP_TYPE_AGENT           7
-#define VP_TYPE_MAX             8 
+
+#define VP_TYPE_IPOIP           4
+#define VP_TYPE_IP6OIP          5
+
+#define VP_TYPE_AGENT           6
+#define VP_TYPE_UNKNOWN         7
+#define VP_TYPE_MAX             VP_TYPE_UNKNOWN
+
 
 /*
  * Values to define how to proceed with handling a packet.
  */
-#define PKT_RET_FAST_PATH 			1
-#define PKT_RET_SLOW_PATH 			2
-#define PKT_RET_ERROR     			3
-#define PKT_RET_FALLBACK_BRIDGING 		4
+#define PKT_RET_FAST_PATH           1
+#define PKT_RET_SLOW_PATH           2
+#define PKT_RET_ERROR               3
 
 /*
  * Values to define the MPLS tunnel type
  */
-#define PKT_MPLS_TUNNEL_INVALID     0x00
-#define PKT_MPLS_TUNNEL_L3          0x01
-#define PKT_MPLS_TUNNEL_L2_UCAST    0x02
-#define PKT_MPLS_TUNNEL_L2_MCAST    0x03
+#define PKT_MPLS_TUNNEL_INVALID         0x00
+#define PKT_MPLS_TUNNEL_L3              0x01
+#define PKT_MPLS_TUNNEL_L2_UCAST        0x02
+#define PKT_MPLS_TUNNEL_L2_MCAST        0x03
+#define PKT_MPLS_TUNNEL_L2_MCAST_EVPN   0x04
+
+
+/*
+ * Values to defaine the srouce of Multicast packet
+ */
+#define PKT_SRC_TOR_REPL_TREE      0x1
+#define PKT_SRC_INGRESS_REPL_TREE  0x2
+#define PKT_SRC_EDGE_REPL_TREE     0x4
+#define PKT_SRC_ANY_REPL_TREE      (PKT_SRC_TOR_REPL_TREE | \
+                PKT_SRC_SRC_REPL_TREE | PKT_SRC_EDGE_REPL_TREE)
+
 
 /*
  * Values to define the encap type of outgoing packet
  */
-#define PKT_ENCAP_MPLS  0x01
-#define PKT_ENCAP_VXLAN 0x02
+#define PKT_ENCAP_MPLS          0x01
+#define PKT_ENCAP_VXLAN         0x02
+
 
 /* packet drop reasons */
 #define VP_DROP_DISCARD                     0
 #define VP_DROP_PULL                        1
 #define VP_DROP_INVALID_IF                  2
-#define VP_DROP_ARP_NOT_ME                  3
+#define VP_DROP_ARP_NO_WHERE_TO_GO          3
 #define VP_DROP_GARP_FROM_VM                4
 #define VP_DROP_INVALID_ARP                 5
 #define VP_DROP_TRAP_NO_IF                  6
@@ -134,7 +157,7 @@
 #define VP_DROP_HEAD_ALLOC_FAIL             26
 #define VP_DROP_HEAD_SPACE_RESERVE_FAIL     27
 #define VP_DROP_PCOW_FAIL                   28
-/* #define VP_DROP_FLOOD                    29 - UNUSED */
+#define VP_DROP_MCAST_DF_BIT                29
 #define VP_DROP_MCAST_CLONE_FAIL            30
 /* #define VP_DROP_COMPOSITE_INVALID_INTERFACE 31 - UNUSED */
 #define VP_DROP_REWRITE_FAIL                32
@@ -147,13 +170,17 @@
 #define VP_DROP_INVALID_VNID                39
 #define VP_DROP_FRAGMENTS                   40
 #define VP_DROP_INVALID_SOURCE              41
-#define VP_DROP_MAX                         42
+#define VP_DROP_ARP_NO_ROUTE                42
+#define VP_DROP_L2_NO_ROUTE                 43
+#define VP_DROP_ARP_REPLY_NO_ROUTE          44
+#define VP_DROP_MAX                         45
+
 
 struct vr_drop_stats {
     uint64_t vds_discard;
     uint64_t vds_pull;
     uint64_t vds_invalid_if;
-    uint64_t vds_arp_not_me;
+    uint64_t vds_arp_no_where_to_go;
     uint64_t vds_garp_from_vm;
     uint64_t vds_invalid_arp;
     uint64_t vds_trap_no_if;
@@ -179,7 +206,7 @@ struct vr_drop_stats {
     uint64_t vds_head_alloc_fail;
     uint64_t vds_head_space_reserve_fail;
     uint64_t vds_pcow_fail;
-    uint64_t vds_flood;
+    uint64_t vds_mcast_df_bit;
     uint64_t vds_mcast_clone_fail;
     uint64_t vds_composite_invalid_interface;
     uint64_t vds_rewrite_fail;
@@ -192,6 +219,10 @@ struct vr_drop_stats {
     uint64_t vds_invalid_vnid;
     uint64_t vds_frag_err;
     uint64_t vds_invalid_source;
+    uint64_t vds_arp_no_route;
+    uint64_t vds_l2_no_route;
+    uint64_t vds_arp_reply_no_route;
+
 };
 
 /*
@@ -214,21 +245,17 @@ struct vr_packet {
     unsigned char vp_ttl;
 };
 
-struct vr_packet_node {
-    struct vr_list_node pl_node;
-    unsigned short pl_proto;
-    struct vr_packet *pl_packet;
-    uint32_t pl_outer_src_ip;
-    uint32_t pl_label;
-    uint32_t pl_vif_idx;
-};
 
 extern void pkt_reset(struct vr_packet *);
 extern struct vr_packet *pkt_copy(struct vr_packet *, unsigned short,
         unsigned short);
-extern int vr_trap(struct vr_packet *, unsigned short, unsigned short, void *);
 extern int vr_myip(struct vr_interface *, unsigned int);
-extern bool vr_should_proxy(struct vr_interface *, unsigned int, unsigned int);
+
+typedef enum {
+    L4_TYPE_UNKNOWN,
+    L4_TYPE_DHCP_REQUEST,
+    L4_TYPE_ROUTER_SOLICITATION,
+} l4_pkt_type_t;
 
 struct vr_eth {
     unsigned char eth_dmac[VR_ETHER_ALEN];
@@ -250,9 +277,16 @@ struct vr_vlan_hdr {
 
 #define VR_ETH_PROTO_ARP        0x806
 #define VR_ETH_PROTO_IP         0x800
+#define VR_ETH_PROTO_IP6        0x86DD
 #define VR_ETH_PROTO_VLAN       0x8100
 
-#define VR_DIAG_IP_CSUM         0xffff
+#define VR_DIAG_CSUM         0xffff
+
+#ifdef arp_op
+#undef arp_op
+#endif
+
+#define VR_ARP_HW_TYPE_ETHER    1
 
 struct vr_arp {
     unsigned short arp_hw;
@@ -266,16 +300,34 @@ struct vr_arp {
     unsigned int arp_dpa;
 } __attribute__((packed));
 
+static inline bool
+vr_grat_arp(struct vr_arp *sarp)
+{
+    if (sarp->arp_spa == sarp->arp_dpa)
+        return true;
+    return false;
+}
+
 #define VR_IP_DF    (0x1 << 14)
 #define VR_IP_MF    (0x1 << 13)
 #define VR_IP_FRAG_OFFSET_MASK (VR_IP_MF - 1)
 
+#define VR_IP_ADDRESS_LEN   4
+
 struct vr_ip {
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(__linux__)
 #if defined(__LITTLE_ENDIAN_BITFIELD)
    unsigned char ip_hl:4,
                  ip_version:4;
 #elif defined(__BIG_ENDIAN_BITFIELD)
+   unsigned char ip_version:4,
+                 ip_hl:4;
+#endif
+#elif defined(__KERNEL__) && defined(__FreeBSD__)
+#if BYTE_ORDER == LITTLE_ENDIAN
+   unsigned char ip_hl:4,
+                 ip_version:4;
+#elif BYTE_ORDER == BIG_ENDIAN
    unsigned char ip_version:4,
                  ip_hl:4;
 #endif
@@ -299,12 +351,110 @@ struct vr_ip {
     unsigned int ip_daddr;
 } __attribute__((packed));
 
+#define SOURCE_LINK_LAYER_ADDRESS_OPTION    1
+#define TARGET_LINK_LAYER_ADDRESS_OPTION    2
+
+struct vr_neighbor_option {
+    uint8_t vno_type;
+    uint8_t vno_length;
+    uint8_t vno_value[0];
+} __attribute__((packed));
+
+
+struct vr_ip6_pseudo {
+    unsigned char ip6_src[VR_IP6_ADDRESS_LEN];
+    unsigned char ip6_dst[VR_IP6_ADDRESS_LEN];
+    unsigned short ip6_l4_length;
+    unsigned short ip6_zero;
+    unsigned int ip6_zero_nh;
+} __attribute__((packed));
+
+
+struct vr_ip6 {
+#ifdef __KERNEL__
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+    unsigned int  
+               ip6_flow:20,
+               ip6_priority:8,
+               ip6_version:4;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+    unsigned int  
+               ip6_version:4,
+               ip6_priority:8,
+               ip6_flow:20;
+#endif
+#else
+#if (__BYTE_ORDER == __LITTLE_ENDIAN)
+    unsigned int  
+               ip6_flow:20,
+               ip6_priority:8,
+               ip6_version:4;
+#elif (__BYTE_ORDER == __BIG_ENDIAN)
+    unsigned int  
+               ip6_version:4,
+               ip6_priority:8,
+               ip6_flow:20;
+#endif
+#endif
+    unsigned short  ip6_plen;
+    unsigned char   ip6_nxt;
+    unsigned char   ip6_hlim;
+    unsigned char ip6_src[VR_IP6_ADDRESS_LEN];
+    unsigned char ip6_dst[VR_IP6_ADDRESS_LEN];
+} __attribute__((packed));
+
+#define MCAST_IP                        (0xE0000000)
+#define MCAST_IP_MASK                   (0xF0000000)
+#define IS_BMCAST_IP(ip) \
+            (((ntohl(ip) & MCAST_IP_MASK) == MCAST_IP) || (ip == 0xFFFFFFFF))
+
+#define VR_IP_ADDR_SIZE(type) \
+        ((type == VP_TYPE_IP6) ? VR_IP6_ADDRESS_LEN \
+                               : VR_IP_ADDRESS_LEN)
+
+static inline unsigned char
+vr_eth_proto_to_pkt_type(unsigned short eth_proto)
+{
+    if (eth_proto == VR_ETH_PROTO_IP)
+        return VP_TYPE_IP;
+    else if (eth_proto == VR_ETH_PROTO_IP6)
+        return VP_TYPE_IP6;
+    else if (eth_proto == VR_ETH_PROTO_ARP)
+        return VP_TYPE_ARP;
+    else
+        return VP_TYPE_UNKNOWN;
+}
+
+static inline bool
+vr_ip_is_ip6(struct vr_ip *iph)
+{
+    if ((iph->ip_version & 0xf) == 0x6)
+        return true;
+    else
+        return false;
+}
+static inline unsigned char *pkt_network_header(struct vr_packet *);
+
+static inline bool
+vr_ip_dont_fragment_set(struct vr_packet *pkt)
+{
+    struct vr_ip *ip;
+
+    ip = (struct vr_ip *)pkt_network_header(pkt);
+    if (ntohs(ip->ip_frag_off) & VR_IP_DF)
+        return true;
+    return false;
+}
+
 static inline bool
 vr_ip_fragment_tail(struct vr_ip *iph)
 {
     unsigned short frag = ntohs(iph->ip_frag_off);
     bool more = (frag & VR_IP_MF) ? true : false;
     unsigned short offset = frag & VR_IP_FRAG_OFFSET_MASK;
+
+    if (vr_ip_is_ip6(iph))
+        return false;
 
     if (!more && offset)
         return true;
@@ -316,11 +466,34 @@ static inline bool
 vr_pkt_is_ip(struct vr_packet *pkt)
 {
     if (pkt->vp_type == VP_TYPE_IPOIP || pkt->vp_type == VP_TYPE_IP ||
-                pkt->vp_type == VP_TYPE_L2 || pkt->vp_type == VP_TYPE_L2OIP ||
-                pkt->vp_type == VP_TYPE_VXLAN)
+              pkt->vp_type == VP_TYPE_IP6OIP)
         return true;
 
     return false;
+}
+
+static inline bool
+vr_pkt_type_is_overlay(unsigned short type)
+{
+    if (type == VP_TYPE_IPOIP || type == VP_TYPE_IP6OIP)
+        return true;
+
+    return false;
+}
+
+static inline bool
+vr_pkt_is_diag(struct vr_packet *pkt)
+{
+    if (pkt->vp_flags & VP_FLAG_DIAG)
+        return true;
+    return false;
+}
+
+static inline void
+vr_pkt_set_diag(struct vr_packet *pkt)
+{
+    pkt->vp_flags |= VP_FLAG_DIAG;
+    return;
 }
 
 static inline bool
@@ -329,6 +502,9 @@ vr_ip_fragment_head(struct vr_ip *iph)
     unsigned short frag = ntohs(iph->ip_frag_off);
     bool more = (frag & VR_IP_MF) ? true : false;
     unsigned short offset = frag & VR_IP_FRAG_OFFSET_MASK;
+
+    if (vr_ip_is_ip6(iph))
+        return false;
 
     if (more && !offset)
         return true;
@@ -343,6 +519,9 @@ vr_ip_fragment(struct vr_ip *iph)
     bool more = (frag & VR_IP_MF) ? true : false;
     unsigned short offset = frag & VR_IP_FRAG_OFFSET_MASK;
 
+    if (vr_ip_is_ip6(iph))
+        return false;
+
     if (offset || more)
         return true;
 
@@ -354,6 +533,9 @@ vr_ip_transport_header_valid(struct vr_ip *iph)
 {
     unsigned short frag = ntohs(iph->ip_frag_off);
     unsigned short offset = frag & VR_IP_FRAG_OFFSET_MASK;
+
+    if (vr_ip_is_ip6(iph))
+        return true;
 
     if (offset)
         return false;
@@ -399,7 +581,18 @@ struct vr_udp {
 } __attribute__((packed));
 
 #define VR_ICMP_TYPE_ECHO_REPLY     0
+#define VR_ICMP_TYPE_DEST_UNREACH   3
 #define VR_ICMP_TYPE_ECHO           8
+#define VR_ICMP_TYPE_TIME_EXCEEDED 11
+
+#define VR_ICMP6_TYPE_PKT_TOO_BIG  2
+#define VR_ICMP6_TYPE_ECHO_REQ     128
+#define VR_ICMP6_TYPE_ECHO_REPLY   129
+#define VR_ICMP6_TYPE_ROUTER_SOL   133
+#define VR_ICMP6_TYPE_NEIGH_SOL    135
+#define VR_ICMP6_TYPE_NEIGH_AD     136
+
+#define VR_IP6_PROTO_FRAG          44
 
 struct vr_icmp {
     uint8_t icmp_type;
@@ -408,12 +601,37 @@ struct vr_icmp {
     /* now only for icmp echo */
     uint16_t icmp_eid;
     uint16_t icmp_eseq;
+    uint8_t  icmp_data[0]; /* compatibility with ICMPv6 */
 } __attribute__((packed));
+
+static inline bool
+vr_icmp_echo(struct vr_icmp *icmph)
+{
+    uint8_t type = icmph->icmp_type;
+
+    if ((type == VR_ICMP_TYPE_ECHO) ||
+            (type == VR_ICMP_TYPE_ECHO_REPLY))
+        return true;
+
+    return false;
+}
+
+static inline bool
+vr_icmp_error(struct vr_icmp *icmph)
+{
+    uint8_t type = icmph->icmp_type;
+
+    if ((type == VR_ICMP_TYPE_DEST_UNREACH) ||
+            (type == VR_ICMP_TYPE_TIME_EXCEEDED))
+        return true;
+
+    return false;
+}
 
 struct vr_gre {
     unsigned short gre_flags;
     unsigned short gre_proto;
-}  __attribute__((packed));
+} __attribute__((packed));
 
 struct vr_pcap {
     /* timestamp seconds */
@@ -421,7 +639,7 @@ struct vr_pcap {
     /* timestamp microseconds */
     unsigned int pcap_ts_usec;
     /* number of octets of packet saved in file */
-    unsigned int pcap_incl_len;         
+    unsigned int pcap_incl_len;
     /* actual length of packet */
     unsigned int pcap_orig_len;
 };
@@ -476,6 +694,11 @@ extern unsigned short vr_generate_unique_ip_id(void);
 extern void vr_proto_fragment(struct vr_interface *, struct vr_packet *);
 extern unsigned short vr_ip_partial_csum(struct vr_ip *);
 
+enum {
+    UNKNOWN_SOURCE,
+    TOR_SOURCE,
+};
+
 /*
  * forwarding metadata is something that is carried through out the
  * forwarding path. we are constrained by what can be held in the
@@ -492,6 +715,9 @@ struct vr_forwarding_md {
     int16_t fmd_dvrf;
     uint32_t fmd_outer_src_ip;
     uint16_t fmd_vlan;
+    uint16_t fmd_udp_src_port;
+    uint8_t fmd_to_me;
+    uint8_t fmd_src;
 };
 
 static inline void
@@ -503,11 +729,22 @@ vr_init_forwarding_md(struct vr_forwarding_md *fmd)
     fmd->fmd_label = -1;
     fmd->fmd_dvrf = -1;
     fmd->fmd_outer_src_ip = 0;
-    fmd->fmd_vlan = 4096;
+    fmd->fmd_vlan = VLAN_ID_INVALID;
+    fmd->fmd_udp_src_port = 0;
+    fmd->fmd_to_me = 0;
+    fmd->fmd_src = 0;
     return;
 }
 
 #define VR_AGENT_MIN_PACKET_LEN     128
+
+static inline bool
+pkt_is_gso(struct vr_packet *pkt)
+{
+    if (vr_pgso_size && vr_pgso_size(pkt))
+        return true;
+    return false;
+}
 
 static inline unsigned char *
 pkt_data_at_offset(struct vr_packet *pkt, unsigned short off)
@@ -550,7 +787,7 @@ pkt_get_inner_network_header_off(struct vr_packet *pkt)
 
 }
 
-static inline void 
+static inline void
 pkt_set_network_header(struct vr_packet *pkt, unsigned short off)
 {
     pkt->vp_network_h = off;
@@ -570,7 +807,6 @@ pkt_network_header(struct vr_packet *pkt)
         return pkt->vp_head + pkt->vp_network_h;
 
     return vr_network_header(pkt);
-    
 }
 
 static inline unsigned char *
@@ -601,7 +837,7 @@ static inline unsigned char *
 pkt_push(struct vr_packet *pkt, unsigned int len)
 {
     if (len > pkt->vp_data)
-	    return NULL;
+        return NULL;
 
     pkt->vp_data -= len;
     pkt->vp_len += len;

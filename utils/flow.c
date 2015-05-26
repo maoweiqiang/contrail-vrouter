@@ -8,14 +8,12 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <assert.h>
 #include <time.h>
-
-#include <asm/types.h>
 
 #include <sys/types.h>
 #include <sys/time.h>
@@ -24,11 +22,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/mman.h>
+#if defined(__linux__)
 #include <asm/types.h>
 
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/if_ether.h>
+#endif
 
 #include <net/if.h>
 #ifdef __KERNEL__
@@ -40,9 +40,14 @@
 #include "vr_mirror.h"
 #include "vr_genetlink.h"
 #include "nl_util.h"
+#include "vr_os.h"
+#include "ini_parser.h"
+#include "vr_packet.h"
 
 #define TABLE_FLAG_VALID        0x1
+
 #define MEM_DEV                 "/dev/flow"
+int mem_fd;
 
 static int dvrf_set, mir_set, help_set;
 static unsigned short dvrf;
@@ -54,11 +59,17 @@ struct flow_table {
     struct vr_flow_entry *ft_entries;
     u_int64_t ft_entries_p;
     u_int64_t ft_span;
+    u_int64_t ft_processed;
+    u_int64_t ft_created;
+    u_int64_t ft_added;
     unsigned int ft_num_entries;
     unsigned int ft_flags;
+    unsigned int ft_cpus;
+    unsigned int ft_hold_oflows;
+    u_int32_t ft_hold_stat[64];
+    char flow_table_path[256];
 } main_table;
 
-int mem_fd;
 struct nl_client *cl;
 vr_flow_req flow_req;
 
@@ -69,43 +80,147 @@ flow_get(unsigned int flow_index)
     return &main_table.ft_entries[flow_index];
 }
 
+const char *
+flow_get_drop_reason(uint8_t drop_code)
+{
+    switch (drop_code) {
+    case VR_FLOW_DR_UNKNOWN:
+        return "Unknown";
+    case VR_FLOW_DR_UNAVIALABLE_INTF:
+        return "IntfErr";
+    case VR_FLOW_DR_IPv4_FWD_DIS:
+        return "Ipv4Dis";
+    case VR_FLOW_DR_UNAVAILABLE_VRF:
+        return "VrfErr";
+    case VR_FLOW_DR_NO_SRC_ROUTE:
+        return "NoSrcRt";
+    case VR_FLOW_DR_NO_DST_ROUTE:
+        return "NoDstRt";
+    case VR_FLOW_DR_AUDIT_ENTRY:
+        return "Audit";
+    case VR_FLOW_DR_VRF_CHANGE:
+        return "VrfChange";
+    case VR_FLOW_DR_NO_REVERSE_FLOW:
+        return "NoRevFlow";
+    case VR_FLOW_DR_REVERSE_FLOW_CHANGE:
+        return "RevFlowChng";
+    case VR_FLOW_DR_NAT_CHANGE:
+        return "NatChng";
+    case VR_FLOW_DR_FLOW_LIMIT:
+        return "FlowLim";
+    case VR_FLOW_DR_LINKLOCAL_SRC_NAT:
+        return "LinkSrcNatErr";
+    case VR_FLOW_DR_POLICY:
+        return "Policy";
+    case VR_FLOW_DR_OUT_POLICY:
+        return "OutPolicy";
+    case VR_FLOW_DR_SG:
+        return "SG";
+    case VR_FLOW_DR_OUT_SG:
+        return "OutSG";
+    case VR_FLOW_DR_REVERSE_SG:
+        return "RevSG";
+    case VR_FLOW_DR_REVERSE_OUT_SG:
+        return "RevOutSG";
+    default:
+        break;
+    }
+    return NULL;
+}
+
+static void
+dump_legend(void)
+{
+    printf("Action:F=Forward, D=Drop ");
+    printf("N=NAT(S=SNAT, D=DNAT, Ps=SPAT, Pd=DPAT, ");
+    printf("L=Link Local Port)\n");
+
+    printf(" Other:K(nh)=Key_Nexthop, S(nh)=RPF_Nexthop\n");
+    printf("\n");
+
+    return;
+}
+
 static void
 dump_table(struct flow_table *ft)
 {
-    unsigned int i, j, fi, need_flag_print = 0;
+    unsigned int i, j, k, fi, need_flag_print = 0, printed;
     struct vr_flow_entry *fe;
     char action, flag_string[sizeof(fe->fe_flags) * 8 + 32];
-    struct in_addr in_src, in_dest;
+    unsigned int need_drop_reason = 0;
+    const char *drop_reason = NULL;
+    char in_src[INET_ADDRSTRLEN], in_dest[INET6_ADDRSTRLEN];
 
-    printf("Flow table\n\n");
-    printf(" Index              Source:Port           Destination:Port    \tProto(V)\n");
+    printf("Flow table(size %lu, entries %u)\n\n", ft->ft_span,
+            ft->ft_num_entries);
+    printf("Entries: Created %lu Added %lu Processed %lu\n",
+            ft->ft_created, ft->ft_added, ft->ft_processed);
+    printf("(Created Flows/CPU: ");
+    for (i = 0; i < ft->ft_cpus; i++) {
+        printf("%u", ft->ft_hold_stat[i]);
+        if (i != (ft->ft_cpus - 1))
+            printf(" ");
+    }
+    printf(")(oflows %u)\n\n", ft->ft_hold_oflows);
+
+    dump_legend();
+
+    printf("    Index            ");
+    /* inter field gap */
+    printf("%4c", ' ');
+    /* 40 byte address field - middled header */
+    printf("Source:Port/Destination:Port                  ");
+    /* inter field gap */
+    printf("%4c", ' ');
+    printf("Proto(V)\n");
     printf("-----------------------------------------------------------------");
-    printf("--------\n");
+    printf("------------------\n");
     for (i = 0; i < ft->ft_num_entries; i++) {
         bzero(flag_string, sizeof(flag_string));
         need_flag_print = 0;
+        need_drop_reason = 0;
         fe = (struct vr_flow_entry *)((char *)ft->ft_entries + (i * sizeof(*fe)));
         if (fe->fe_flags & VR_FLOW_FLAG_ACTIVE) {
-            in_src.s_addr = fe->fe_key.key_src_ip;
-            in_dest.s_addr = fe->fe_key.key_dest_ip;
-            printf("%6d", i);
+            if ((fe->fe_type == VP_TYPE_IP) || (fe->fe_type == VP_TYPE_IP6)) {
+                inet_ntop(VR_FLOW_FAMILY(fe->fe_type), fe->fe_key.flow_ip,
+                            in_src, sizeof(in_src));
+                inet_ntop(VR_FLOW_FAMILY(fe->fe_type),
+                      &fe->fe_key.flow_ip[VR_IP_ADDR_SIZE(fe->fe_type)],
+                      in_dest, sizeof(in_dest));
+            }
+
+            printf("%9d", i);
             if (fe->fe_rflow >= 0)
-                printf("<=>%-6d", fe->fe_rflow);
+                printf("<=>%-9d", fe->fe_rflow);
             else
-                printf("         ");
+                printf("%12c", ' ');
 
-            printf("   %12s:%-5d    ", inet_ntoa(in_src),
-                    ntohs(fe->fe_key.key_src_port));
-            printf("%16s:%-5d    %d (%d",
-                    inet_ntoa(in_dest),
-                    ntohs(fe->fe_key.key_dst_port),
-                    fe->fe_key.key_proto,
-                    fe->fe_vrf);
+            printf("%4c", ' ');
+            if (fe->fe_type == VP_TYPE_IP) {
+                printed = printf("%s:%-5d", in_src, ntohs(fe->fe_key.flow_sport));
+                for (k = printed; k < 46; k++)
+                    printf(" ");
+                printf("%4c", ' ');
+                printf("%3d (%d", fe->fe_key.flow_proto, fe->fe_vrf);
+                if (fe->fe_flags & VR_FLOW_FLAG_VRFT)
+                    printf("->%d", fe->fe_dvrf);
+                printf(")\n");
+                printf("%25c", ' ');
+                printf("%s:%-5d", in_dest, ntohs(fe->fe_key.flow_dport));
+            } else if (fe->fe_type == VP_TYPE_IP6) {
+                printed = printf("%s:%-5d    ", in_src, ntohs(fe->fe_key.flow_sport));
+                for (k = printed; k < 46; k++)
+                    printf(" ");
+                printf("%4c", ' ');
+                printf("%3d (%d", fe->fe_key.flow_proto, fe->fe_vrf);
+                if (fe->fe_flags & VR_FLOW_FLAG_VRFT)
+                    printf("->%d", fe->fe_dvrf);
+                printf(")\n");
+                printf("%25c", ' ');
+                printf("%s:%-5d    ", in_dest, ntohs(fe->fe_key.flow_dport));
+            }
 
-            if (fe->fe_flags & VR_FLOW_FLAG_VRFT)
-                printf("->%d", fe->fe_dvrf);
-
-            printf(")\n");
+            printf("\n");
 
             switch (fe->fe_action) {
             case VR_FLOW_ACTION_HOLD:
@@ -118,6 +233,8 @@ dump_table(struct flow_table *ft)
 
             case VR_FLOW_ACTION_DROP:
                 action = 'D';
+                need_drop_reason = 1;
+                drop_reason = flow_get_drop_reason(fe->fe_drop_reason);
                 break;
 
             case VR_FLOW_ACTION_NAT:
@@ -140,6 +257,9 @@ dump_table(struct flow_table *ft)
                     case VR_FLOW_FLAG_DPAT:
                         flag_string[fi++] = 'P';
                         flag_string[fi++] = 'd';
+                        break;
+                    case VR_FLOW_FLAG_LINK_LOCAL:
+                        flag_string[fi++] = 'L';
                     }
 
                 break;
@@ -148,11 +268,19 @@ dump_table(struct flow_table *ft)
                 action = 'U';
             }
 
-            printf("\t\t(");
-            printf("K(nh):%u, ", fe->fe_key.key_nh_id);
+            printf("\t(");
+            if ((fe->fe_type == VP_TYPE_IP) || (fe->fe_type == VP_TYPE_IP6))
+                printf("K(nh):%u, ", fe->fe_key.flow_nh_id);
+
             printf("Action:%c", action);
             if (need_flag_print)
                 printf("(%s)", flag_string);
+            if (need_drop_reason) {
+                if (drop_reason != NULL)
+                    printf("(%s)", drop_reason);
+                else
+                    printf("(%u)", fe->fe_drop_reason);
+            }
 
             printf(", ");
             if (fe->fe_ecmp_nh_index >= 0)
@@ -168,6 +296,7 @@ dump_table(struct flow_table *ft)
                 if (fe->fe_sec_mirror_id < VR_MAX_MIRROR_INDICES)
                     printf(", %d", fe->fe_sec_mirror_id);
             }
+            printf(" UdpSrcPort %d", fe->fe_udp_src_port);
             printf(")\n\n");
         }
     }
@@ -260,14 +389,20 @@ flow_stats(void)
             }
         }
 
-        system("clear");
+        /* On Ubuntu system() is declared with warn_unused_result
+         * attribute, so we suppress the warning
+         */
+        if (system("clear") == -1) {
+            printf("Error: system() failed\n");
+        }
+
         struct tm *tm;
         char fmt[64], buf[64];
         if((tm = localtime(&now.tv_sec)) != NULL)
         {
             strftime(fmt, sizeof fmt, "%Y-%m-%d %H:%M:%S %z", tm);
             snprintf(buf, sizeof buf, fmt, now.tv_usec);
-            printf("%s\n", buf); 
+            printf("%s\n", buf);
         }
 
         printf("Flow Statistics\n");
@@ -339,6 +474,7 @@ flow_rate(void)
             printf("New = %4d, Flow setup rate = %4d flows/sec, ",
                    (active_entries - prev_active_entries), rate);
             printf("Flow rate = %4d flows/sec, for last %4d ms\n", total_rate, diff_ms);
+            fflush(stdout);
         }
 
         last_time = now;
@@ -362,19 +498,28 @@ int
 flow_table_map(vr_flow_req *req)
 {
     int ret;
+    unsigned int i;
     struct flow_table *ft = &main_table;
+    const char *flow_path;
 
     if (req->fr_ftable_dev < 0)
         exit(ENODEV);
 
-    ret = mknod(MEM_DEV, S_IFCHR | O_RDWR,
-            makedev(req->fr_ftable_dev, req->fr_rid));
-    if (ret && errno != EEXIST) {
-        perror(MEM_DEV);
-        exit(errno);
+    const char *platform = read_string(DEFAULT_SECTION, PLATFORM_KEY);
+    if (platform && ((strcmp(platform, PLATFORM_DPDK) == 0) ||
+                (strcmp(platform, PLATFORM_NIC) == 0))) {
+        flow_path = req->fr_file_path;
+    } else {
+        flow_path = MEM_DEV;
+        ret = mknod(MEM_DEV, S_IFCHR | O_RDWR,
+                makedev(req->fr_ftable_dev, req->fr_rid));
+        if (ret && errno != EEXIST) {
+            perror(MEM_DEV);
+            exit(errno);
+        }
     }
 
-    mem_fd = open(MEM_DEV, O_RDONLY | O_SYNC);
+    mem_fd = open(flow_path, O_RDONLY | O_SYNC);
     if (mem_fd <= 0) {
         perror(MEM_DEV);
         exit(errno);
@@ -382,6 +527,8 @@ flow_table_map(vr_flow_req *req)
 
     ft->ft_entries = (struct vr_flow_entry *)mmap(NULL, req->fr_ftable_size,
             PROT_READ, MAP_SHARED, mem_fd, 0);
+    /* the file descriptor is no longer needed */
+    close(mem_fd);
     if (ft->ft_entries == MAP_FAILED) {
         printf("flow table: %s\n", strerror(errno));
         exit(errno);
@@ -389,6 +536,18 @@ flow_table_map(vr_flow_req *req)
 
     ft->ft_span = req->fr_ftable_size;
     ft->ft_num_entries = ft->ft_span / sizeof(struct vr_flow_entry);
+    ft->ft_processed = req->fr_processed;
+    ft->ft_created = req->fr_created;
+    ft->ft_hold_oflows = req->fr_hold_oflows;
+    ft->ft_added = req->fr_added;
+    ft->ft_cpus = req->fr_cpus;
+
+    if (req->fr_hold_stat && req->fr_hold_stat_size) {
+        for (i = 0; i < ft->ft_cpus; i++) {
+            ft->ft_hold_stat[i] = req->fr_hold_stat[i];
+        }
+    }
+
     return ft->ft_num_entries;
 }
 
@@ -444,7 +603,7 @@ make_flow_req(vr_flow_req *req)
     if (ret <= 0)
         return ret;
 
-    while ((ret = nl_recvmsg(cl)) > 0) {
+    if ((ret = nl_recvmsg(cl)) > 0) {
         resp = nl_parse_reply(cl);
         if (resp->nl_op == SANDESH_REQUEST) {
             sandesh_decode(resp->nl_data, resp->nl_len, vr_find_sandesh_info, &ret);
@@ -476,8 +635,13 @@ flow_table_setup(void)
     if (!cl)
         return -ENOMEM;
 
-    ret = nl_socket(cl, NETLINK_GENERIC);
+    parse_ini_file();
+    ret = nl_socket(cl, get_domain(), get_type(), get_protocol());
     if (ret <= 0)
+        return ret;
+
+    ret = nl_connect(cl, get_ip(), get_port());
+    if (ret < 0)
         return ret;
 
     ret = vrouter_get_family_id(cl);
@@ -495,16 +659,20 @@ flow_validate(int flow_index, char action)
     memset(&flow_req, 0, sizeof(flow_req));
 
     fe = flow_get(flow_index);
+    if ((fe->fe_type != VP_TYPE_IP) && (fe->fe_type != VP_TYPE_IP6))
+        return;
 
     flow_req.fr_op = FLOW_OP_FLOW_SET;
     flow_req.fr_index = flow_index;
+    flow_req.fr_family = VR_FLOW_FAMILY(fe->fe_type);
     flow_req.fr_flags = VR_FLOW_FLAG_ACTIVE;
-    flow_req.fr_flow_sip = fe->fe_key.key_src_ip;
-    flow_req.fr_flow_dip = fe->fe_key.key_dest_ip;
-    flow_req.fr_flow_proto = fe->fe_key.key_proto;
-    flow_req.fr_flow_sport = fe->fe_key.key_src_port;
-    flow_req.fr_flow_dport = fe->fe_key.key_dst_port;
-    flow_req.fr_flow_nh_id = fe->fe_key.key_nh_id;
+    memcpy(flow_req.fr_flow_ip, fe->fe_key.flow_ip,
+              2 * VR_IP_ADDR_SIZE(fe->fe_type));
+    flow_req.fr_flow_ip_size = 2 * VR_IP_ADDR_SIZE(fe->fe_type);
+    flow_req.fr_flow_proto = fe->fe_key.flow_proto;
+    flow_req.fr_flow_sport = fe->fe_key.flow_sport;
+    flow_req.fr_flow_dport = fe->fe_key.flow_dport;
+    flow_req.fr_flow_nh_id = fe->fe_key.flow_nh_id;
 
     switch (action) {
     case 'd':

@@ -9,14 +9,13 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <getopt.h>
 #include <stdbool.h>
 
-#include <asm/types.h>
-
 #include <sys/types.h>
 #include <sys/socket.h>
+#if defined(__linux__)
 #include <asm/types.h>
 
 #include <linux/netlink.h>
@@ -25,15 +24,22 @@
 
 #include <net/if.h>
 #include <netinet/ether.h>
+#elif defined(__FreeBSD__)
+#include <net/if.h>
+#include <net/ethernet.h>
+#endif
 
 #include "vr_types.h"
 #include "vr_message.h"
 #include "vr_mpls.h"
 #include "vr_genetlink.h"
 #include "nl_util.h"
+#include "vr_os.h"
+#include "ini_parser.h"
 
 static struct nl_client *cl;
 static bool dump_pending = false;
+static bool response_pending = true;
 static int dump_marker = -1;
 
 static int create_set, delete_set, dump_set;
@@ -46,34 +52,42 @@ vr_mpls_req_process(void *s_req)
 {
    vr_mpls_req *req = (vr_mpls_req *)s_req;
 
-   printf("%8d    %6d\n", (req->mr_label & 0xFFFF), (req->mr_nhid & 0xFFFF));
+   printf("%8d    %6d\n", req->mr_label, req->mr_nhid);
    if (mpls_op == SANDESH_OP_DUMP)
        dump_marker = req->mr_label;
 
+   response_pending = false;
 }
 
 void
 vr_response_process(void *s)
 {
-   vr_response *resp = (vr_response *)s;
+    vr_response *resp = (vr_response *)s;
+    response_pending = false;
     if (resp->resp_code < 0) {
         printf("Error: %s\n", strerror(-resp->resp_code));
     } else {
         if (mpls_op == SANDESH_OP_DUMP) {
-            if (resp->resp_code & VR_MESSAGE_DUMP_INCOMPLETE)
+            if (resp->resp_code > 0)
+                response_pending = true;
+
+            if (resp->resp_code & VR_MESSAGE_DUMP_INCOMPLETE) {
                 dump_pending = true;
-            else
+                response_pending = true;
+            } else {
                 dump_pending = false;
+            }
         }
     }
 }
 
-static int 
+static int
 vr_mpls_op(void)
 {
     vr_mpls_req mpls_req;
     int ret, error, attr_len;
     struct nl_response *resp;
+    struct nlmsghdr *nlh;
 
 op_retry:
     mpls_req.h_op = mpls_op;
@@ -106,9 +120,9 @@ op_retry:
     }
 
     attr_len = nl_get_attr_hdr_size();
-     
+
     error = 0;
-    ret = sandesh_encode(&mpls_req, "vr_mpls_req", vr_find_sandesh_info, 
+    ret = sandesh_encode(&mpls_req, "vr_mpls_req", vr_find_sandesh_info,
                              (nl_get_buf_ptr(cl) + attr_len),
                              (nl_get_buf_len(cl) - attr_len), &error);
 
@@ -120,13 +134,21 @@ op_retry:
     nl_build_attr(cl, ret, NL_ATTR_VR_MESSAGE_PROTOCOL);
     nl_update_nlh(cl);
 
+    response_pending = true;
     /* Send the request to kernel */
     ret = nl_sendmsg(cl);
-    while ((ret = nl_recvmsg(cl)) > 0) {
-        resp = nl_parse_reply(cl);
-        if (resp->nl_op == SANDESH_REQUEST) {
-            sandesh_decode(resp->nl_data, resp->nl_len, vr_find_sandesh_info, &ret);
+    while (response_pending) {
+        if ((ret = nl_recvmsg(cl)) > 0) {
+            resp = nl_parse_reply(cl);
+            if (resp->nl_op == SANDESH_REQUEST) {
+                sandesh_decode(resp->nl_data, resp->nl_len,
+                               vr_find_sandesh_info, &ret);
+            }
         }
+
+        nlh = (struct nlmsghdr *)cl->cl_buf;
+        if (!nlh->nlmsg_flags)
+            break;
     }
 
     if (dump_pending)
@@ -241,7 +263,7 @@ parse_long_opts(int opt_index, char *opt_arg)
 static void
 validate_options(void)
 {
-    int sum_op = create_set + delete_set + dump_set + get_set; 
+    int sum_op = create_set + delete_set + dump_set + get_set;
 
     if (sum_op > 1 || mpls_op < 0)
         Usage();
@@ -262,12 +284,8 @@ int main(int argc, char *argv[])
     int ret;
     int opt;
     int option_index;
-    uint32_t nh_id;
-    int32_t label;
 
-    nh_id = 0;
-    label = -1;
-    while ((opt = getopt_long(argc, argv, "bcdgn:l:", 
+    while ((opt = getopt_long(argc, argv, "bcdgn:l:",
                     long_options, &option_index)) >= 0) {
             switch (opt) {
             case 'c':
@@ -299,12 +317,12 @@ int main(int argc, char *argv[])
                 break;
 
             case 'n':
-                nh_id = atoi(optarg);
+                mpls_nh = atoi(optarg);
                 nh_set = 1;
                 break;
 
             case 'l':
-                label = atoi(optarg);
+                mpls_label = atoi(optarg);
                 label_set = 1;
                 break;
 
@@ -332,9 +350,16 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    ret = nl_socket(cl, NETLINK_GENERIC);    
+    parse_ini_file();
+
+    ret = nl_socket(cl, get_domain(), get_type(), get_protocol());
     if (ret <= 0) {
-       exit(1);
+        exit(1);
+    }
+
+    ret = nl_connect(cl, get_ip(), get_port());
+    if (ret < 0) {
+        exit(1);
     }
 
     if (vrouter_get_family_id(cl) <= 0) {
